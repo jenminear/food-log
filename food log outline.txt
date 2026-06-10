@@ -1,0 +1,43 @@
+** Add a recipe **
+
+1. Input a new recipe from a looking at a picture, from a web address, or from a manual interface
+    1. Create a new “recipe” record
+	2. For each ingredient in the recipe:
+	    1.  See if the recipe already exists in the ingredients table
+	    2.  If it does not, create a new ingredient record
+			1.	If the nutritional information on the ingredient is not known, go and find it on the web and record the url in the source field (alternatively, use the recipe_id)
+		3.	Create a component record referencing the ingredient_id and the recipe_id and specify the quantity
+	3.	Allow human to add notes to the recipe
+		1.	For each, create a “notes” record and associate it with the recipe
+
+** Create a batch **
+
+1.	Provide a search capability to retrieve the recipe by name (via word search across existing recipe names)
+2.	Create a new batch (with date and id and reference the recipe_id)
+3.	Add / subtract / modify ingredients and quantities, as requested. 
+	1.	Upon first change request: Set “recipe_changes” flag to “yes” and copy components associated with recipe to components table and associate with the batch_id (but not the recipe_id)
+	2.	If ingredient is removed, remove the associated component record (for this batch)
+	3.	If ingredient is added, create a new ingredients record, if necessary. Create a new component record (referencing the ingredient and the batch)
+	4.	If ingredient quantity is changed, change the quantity_multiple in the components record
+	5.	Allow human to add notes that reference the batch_id when changes are made
+
+** Record a meal **
+
+1.	Create a new meal record
+	1.	Ask human to specify meal type and what the meal consists of (conduct search across recipe names and ingredient names)
+		1.	If the meal is related to a recipe name, find the most recent batch of that recipe and associate the batch_id with the meal. 
+			1.	Ask human what fraction of the batch is being consumed and record response
+		2.	If the meal is a collection of ingredients (without an associated recipe), ask human what ingredients and quantities are involved and add each to the components table with the meal_id
+2.	Record any notes the human has about the meal
+
+** Show daily nutritional info **
+
+1.	For a given date, show each meal associated with that date in chronological order. 
+2.	Show the nutritional information:
+	1.	If the meal has an associated batch_id, show the recipe name and sum the nutritional measures across all components in the batch multiplied by the fraction of the batch associated with the meal
+	2.	If the meal does not have a batch_id, show the nutritional measures for each component of the meal along with their ingredient names. Multiply nutritional measures by the quantity_multiple from the components table
+
+** Show aggregate nutritional info for a given date range (e.g., a week) **
+
+1.	Ask the user for the date range
+2.	Sum nutritional information across all meals with dates falling in that range

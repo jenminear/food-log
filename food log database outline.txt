@@ -1,0 +1,56 @@
+**recipes**
+recipe_id (int) [R]
+recipe_name (varchar)
+picture (jpg)
+steps_txt (text)
+num_servings (float, 2)
+active_time (time)
+total_time (time)
+need_oven (yes/no)
+vegan (yes/no)
+vegetarian (yes/no)
+source (blob? -- could be picture or url)
+
+**batches**
+batch_id (int) [R]
+recipe_id (int) [R]
+date (date) [R]
+picture (jpg)
+recipe_changes (yes/no) [R] [default: no]
+
+**ingredients**
+ingredient_id (int) [R]
+ingredient_name (varchar)
+base_quantity (float, 2) [R]
+quantity_unit (varchar) [R]
+protein_grams (float, 2)
+fat_grams (float, 2)
+carb_grams (float, 2)
+fiber_grams (float, 2)
+calories (float, 2)
+nutrition_info_source (varchar)
+
+**components**
+component_id (int) [R]
+recipe_id (int) 
+batch_id (int)
+snack_id (int)
+ingredient_id (int) [R]
+quantity_multiple (float, 2) [R]
+
+**meals**
+meal_id (int) [R]
+meal_type (enum: breakfast, lunch, dinner, morning_snack, afternoon_snack, evening_snack) [R]
+date (date) [R]
+timestamp (time)
+fraction_of_batch (float, 2)
+batch_id (int)
+
+
+**notes**
+note_id [R]
+note_date (date) [R]
+recipe_id
+batch_id
+meal_id
+note_txt [R]

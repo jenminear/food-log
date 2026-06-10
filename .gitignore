@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Database (keep the schema, not the data)
+food_log.db
+
+# Node
+node_modules/
+
+# Build output
+dist/

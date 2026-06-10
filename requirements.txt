@@ -1,0 +1,9 @@
+# Food Log API — Python dependencies
+# Install with:  pip install -r requirements.txt
+
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9     # required for file uploads
+pydantic>=2.7.0
+httpx>=0.27.0               # required by FastAPI TestClient
+pytest>=8.2.0               # optional — for running tests with pytest
