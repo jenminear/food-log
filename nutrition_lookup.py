@@ -101,8 +101,7 @@ class NutritionResult:
     source_url: str               # direct URL to the data source record
 
     # Portion (for unit conversion in recipes)
-    portion_amount: float         # e.g. 1.0
-    portion_unit: str             # e.g. "cup"
+    portion_unit: str             # e.g. "1 cup"
     portion_grams: float          # e.g. 90.0  (grams per one portion)
 
     # Nutrition per 100g (None = not available in source)
@@ -128,7 +127,7 @@ class NutritionResult:
         """One-line human-readable summary for display."""
         cal  = f"{self.calories:.0f} kcal" if self.calories is not None else "? kcal"
         prot = f"{self.protein_grams:.1f}g protein" if self.protein_grams is not None else "? protein"
-        portion = f"{self.portion_amount:g} {self.portion_unit} = {self.portion_grams:.0f}g"
+        portion = f"{self.portion_unit} = {self.portion_grams:.0f}g"
         return (
             f"{self.ingredient_name}  [{self.source}]  "
             f"{cal}, {prot} per 100g  |  portion: {portion}"
@@ -141,7 +140,6 @@ def result_to_db_kwargs(result: NutritionResult) -> dict:
     db.create_ingredient() or db.update_ingredient_nutrition().
     """
     return {
-        "portion_amount":        result.portion_amount,
         "portion_unit":          result.portion_unit,
         "portion_grams":         result.portion_grams,
         "calories":              result.calories,
@@ -149,7 +147,11 @@ def result_to_db_kwargs(result: NutritionResult) -> dict:
         "fat_grams":             result.fat_grams,
         "carb_grams":            result.carb_grams,
         "fiber_grams":           result.fiber_grams,
-        "nutrition_info_source": result.source_url,
+        "source_food_name":      result.ingredient_name,
+        "nutrition_info_source": (
+            f"USDA: {result.ingredient_name}" if result.source == "usda"
+            else f"{result.source}: {result.ingredient_name}"
+        ),
     }
 
 
@@ -240,19 +242,33 @@ def _usda_data_type_priority(data_type: str) -> int:
 
 
 def _extract_usda_nutrients(food: dict) -> dict[str, Optional[float]]:
-    """Pull the five key nutrients from a USDA food dict."""
+    """Pull the five key nutrients from a USDA food dict.
+
+    The /foods/search endpoint returns flat entries like
+    {"nutrientId": 1008, "value": 389}, while the /food/{fdcId} detail
+    endpoint nests them as {"nutrient": {"id": 1008}, "amount": 389}.
+    Handle both shapes.
+    """
     nutrients = {}
-    nutrient_map = {n["nutrient"]["id"]: n for n in food.get("foodNutrients", [])}
+    nutrient_map = {}
+    for n in food.get("foodNutrients", []):
+        nid = n["nutrient"]["id"] if "nutrient" in n else n.get("nutrientId")
+        if nid is not None:
+            nutrient_map[nid] = n
     for key, nid in _USDA_NUTRIENT_IDS.items():
         entry = nutrient_map.get(nid)
-        nutrients[key] = round(entry["amount"], 2) if entry and "amount" in entry else None
+        if entry is None:
+            nutrients[key] = None
+            continue
+        value = entry["amount"] if "amount" in entry else entry.get("value")
+        nutrients[key] = round(value, 2) if value is not None else None
     return nutrients
 
 
-def _extract_usda_portions(food: dict) -> tuple[float, str, float, list]:
+def _extract_usda_portions(food: dict) -> tuple[str, float, list]:
     """
     Extract the best portion and all available portions from a USDA food dict.
-    Returns (portion_amount, portion_unit, portion_grams, all_portions).
+    Returns (portion_unit, portion_grams, all_portions).
     Falls back to 100g if no portions available.
     """
     measures = food.get("foodMeasures", [])
@@ -261,10 +277,29 @@ def _extract_usda_portions(food: dict) -> tuple[float, str, float, list]:
     for m in measures:
         desc        = m.get("disseminationText", m.get("measureDescription", ""))
         grams       = m.get("gramWeight")
-        amount      = m.get("measurementAmount", m.get("amount", 1.0))
         if grams and desc:
             all_portions.append({
-                "amount": float(amount),
+                "unit":   desc,
+                "grams":  float(grams),
+            })
+
+    # SR Legacy / Foundation foods describe portions via
+    # foodPortions: {"amount": 1.0, "modifier": "cup", "gramWeight": 156.0}.
+    # Survey (FNDDS) foods instead have a human-readable "portionDescription"
+    # (e.g. "1 small") and a numeric "modifier" portion code (not a unit).
+    if not all_portions:
+        for p in food.get("foodPortions", []):
+            grams = p.get("gramWeight")
+            if not grams:
+                continue
+            desc = p.get("portionDescription", "")
+            if not desc or desc.lower() == "quantity not specified":
+                amount   = p.get("amount")
+                modifier = p.get("modifier", "")
+                if not modifier or modifier.lower() == "undetermined" or modifier.isdigit():
+                    continue
+                desc = f"{amount:g} {modifier}" if amount else modifier
+            all_portions.append({
                 "unit":   desc,
                 "grams":  float(grams),
             })
@@ -275,14 +310,13 @@ def _extract_usda_portions(food: dict) -> tuple[float, str, float, list]:
         srv_unit = food.get("servingSizeUnit", "g")
         if srv_size:
             all_portions.append({
-                "amount": 1.0,
                 "unit":   srv_unit,
                 "grams":  float(srv_size),
             })
 
     if not all_portions:
-        # Default: 100g portion
-        return 100.0, "g", 100.0, []
+        # Default: plain grams (1 unit = 1g)
+        return "g", 1.0, []
 
     # Pick the best portion: prefer recognisable volume/unit measures
     def portion_score(p: dict) -> int:
@@ -293,7 +327,12 @@ def _extract_usda_portions(food: dict) -> tuple[float, str, float, list]:
         return 99
 
     best = min(all_portions, key=portion_score)
-    return best["amount"], best["unit"], best["grams"], all_portions
+    return best["unit"], best["grams"], all_portions
+
+
+def _singular(word: str) -> str:
+    """Crude singularization so "apple" matches "apples"."""
+    return word[:-1] if word.endswith("s") and len(word) > 3 else word
 
 
 def _score_usda_result(query: str, food: dict) -> float:
@@ -303,18 +342,20 @@ def _score_usda_result(query: str, food: dict) -> float:
     """
     desc = food.get("description", "").lower()
     query_lower = query.lower()
-    query_words = set(query_lower.split())
+    query_words = {_singular(w) for w in query_lower.split()}
 
-    # Resolve data_type up front so it's available for all branches
+    # Resolve data_type up front so it's available for all branches.
+    # Kept small relative to word/head scoring so it acts as a tiebreaker,
+    # not something that alone can push an irrelevant match to "high confidence".
     data_type  = food.get("dataType", "")
-    type_boost = max(0.0, 0.1 * (len(USDA_PREFERRED_DATA_TYPES) - _usda_data_type_priority(data_type)))
+    type_boost = max(0.0, 0.04 * (len(USDA_PREFERRED_DATA_TYPES) - _usda_data_type_priority(data_type)))
 
     # Exact match — factor in data type so SR Legacy beats Branded on equal names
     if desc == query_lower:
-        return min(1.0, 0.85 + type_boost)
+        return min(1.0, 0.9 + type_boost)
 
-    # Word overlap
-    desc_words = set(re.findall(r'\w+', desc))
+    # Word overlap (singular-normalised so "apple" matches "apples, raw")
+    desc_words = {_singular(w) for w in re.findall(r'\w+', desc)}
     overlap = query_words & desc_words
     word_score = len(overlap) / max(len(query_words), 1)
 
@@ -323,7 +364,18 @@ def _score_usda_result(query: str, food: dict) -> float:
     extra_words = len(desc_words - query_words)
     brevity_penalty = max(0.0, 1.0 - (extra_words / max(len(desc_words), 1)) * 0.5)
 
-    return min(1.0, word_score * brevity_penalty + type_boost)
+    # Bonus if the query matches the head term of the description (the part
+    # before the first comma), e.g. "Apples, raw" for query "apple".
+    # Without this, modifier matches like "Croissants, apple" can outscore
+    # the actual food the user is looking for. Only applies when the
+    # description actually has a "Head, modifiers" structure.
+    head_bonus = 0.0
+    if ',' in desc:
+        head_words = {_singular(w) for w in re.findall(r'\w+', desc.split(',')[0])}
+        if query_words and query_words <= head_words:
+            head_bonus = 0.15
+
+    return min(1.0, word_score * brevity_penalty + type_boost + head_bonus)
 
 
 def _search_usda(
@@ -333,13 +385,13 @@ def _search_usda(
     Search USDA FoodData Central and return NutritionResult candidates.
     Uses the /foods/search endpoint, then fetches full detail for top hits.
     """
-    # Step 1: search
+    # Step 1: search. Fetch more than max_results so that less-common data
+    # types (e.g. SR Legacy) aren't crowded out by Branded products before
+    # we get a chance to score and rank them ourselves.
     search_payload = {
         "query":         query,
         "dataType":      USDA_PREFERRED_DATA_TYPES,
-        "pageSize":      max_results,
-        "sortBy":        "dataType.keyword",
-        "sortOrder":     "asc",
+        "pageSize":      max(max_results * 5, 50),
     }
     url = f"{USDA_API_BASE}/foods/search?api_key={api_key}"
     data = _post_json(url, search_payload)
@@ -347,7 +399,7 @@ def _search_usda(
         return []
 
     results = []
-    for food in data["foods"][:max_results]:
+    for food in data["foods"]:
         fdc_id    = food.get("fdcId")
         desc      = food.get("description", "Unknown")
         data_type = food.get("dataType", "")
@@ -357,8 +409,7 @@ def _search_usda(
 
         # Portions require a detail fetch (not in search results)
         # We fetch detail only for top candidates to save API calls
-        portion_amount, portion_unit, portion_grams, all_portions = \
-            100.0, "g", 100.0, []
+        portion_unit, portion_grams, all_portions = "g", 1.0, []
 
         confidence = _score_usda_result(query, food)
         source_url = f"https://fdc.nal.usda.gov/fdc-app.html#/food-details/{fdc_id}/nutrients"
@@ -368,7 +419,6 @@ def _search_usda(
             source          = "usda",
             source_id       = str(fdc_id),
             source_url      = source_url,
-            portion_amount  = portion_amount,
             portion_unit    = portion_unit,
             portion_grams   = portion_grams,
             confidence      = confidence,
@@ -377,8 +427,10 @@ def _search_usda(
             **nutrients,
         ))
 
-    # Step 2: fetch full detail for the top 3 to get portion data
+    # Step 2: keep only the top candidates, then fetch full detail for the
+    # top 3 to get portion data
     results.sort(key=lambda r: -r.confidence)
+    results = results[:max_results]
     for result in results[:3]:
         try:
             detail = _get_json(
@@ -386,8 +438,7 @@ def _search_usda(
                 params={"api_key": api_key},
             )
             if detail:
-                pa, pu, pg, all_p = _extract_usda_portions(detail)
-                result.portion_amount = pa
+                pu, pg, all_p = _extract_usda_portions(detail)
                 result.portion_unit   = pu
                 result.portion_grams  = pg
                 result.all_portions   = all_p
@@ -422,7 +473,7 @@ def _extract_off_nutrients(product: dict) -> dict[str, Optional[float]]:
     }
 
 
-def _extract_off_portions(product: dict) -> tuple[float, str, float, list]:
+def _extract_off_portions(product: dict) -> tuple[str, float, list]:
     """Extract serving size from an OFF product. Falls back to 100g.
 
     Handles strings like "30 g", "240 ml", "1 cup (240ml)".
@@ -439,9 +490,9 @@ def _extract_off_portions(product: dict) -> tuple[float, str, float, list]:
             val_str, unit = weight_matches[-1] if weight_matches else matches[-1]
             grams = float(val_str)
             unit  = unit.lower()
-            portion = {"amount": 1.0, "unit": unit, "grams": grams}
-            return 1.0, unit, grams, [portion]
-    return 100.0, "g", 100.0, []
+            portion = {"unit": unit, "grams": grams}
+            return unit, grams, [portion]
+    return "g", 100.0, []
 
 
 def _score_off_result(query: str, product: dict) -> float:
@@ -499,7 +550,7 @@ def _search_off(query: str, max_results: int = 10) -> list[NutritionResult]:
             or "Unknown product"
         )
         nutrients   = _extract_off_nutrients(product)
-        pa, pu, pg, all_p = _extract_off_portions(product)
+        pu, pg, all_p = _extract_off_portions(product)
         confidence  = _score_off_result(query, product)
         source_url  = f"https://world.openfoodfacts.org/product/{pid}"
 
@@ -508,7 +559,6 @@ def _search_off(query: str, max_results: int = 10) -> list[NutritionResult]:
             source          = "open_food_facts",
             source_id       = str(pid),
             source_url      = source_url,
-            portion_amount  = pa,
             portion_unit    = pu,
             portion_grams   = pg,
             confidence      = confidence,

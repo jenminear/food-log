@@ -1,8 +1,10 @@
 """
 routers/notes.py — Notes endpoints
 =====================================
-POST  /notes          Add a note to a recipe, batch, or meal
-GET   /notes          Retrieve notes for a recipe, batch, or meal
+POST   /notes               Add a note to a recipe, batch, or meal
+GET    /notes                Retrieve notes for a recipe, batch, or meal
+PATCH  /notes/{note_id}      Edit a note's text
+DELETE /notes/{note_id}      Delete a note
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 import app as App
 import db
 from dependencies import Auth, DbConn
-from models import NoteRequest, NoteResponse
+from models import NoteDetail, NoteRequest, NoteResponse, NoteUpdateRequest
 
 router = APIRouter(prefix="/notes", tags=["Notes"])
 
@@ -47,7 +49,7 @@ def add_note(req: NoteRequest, conn: DbConn, _: Auth):
 
 @router.get(
     "",
-    response_model=list[dict],
+    response_model=list[NoteDetail],
     summary="Get notes for a recipe, batch, or meal",
 )
 def get_notes(
@@ -72,10 +74,42 @@ def get_notes(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
     return [
-        {
-            "note_id":   n["note_id"],
-            "note_date": n["note_date"],
-            "note_txt":  n["note_txt"],
-        }
+        NoteDetail(
+            note_id   = n["note_id"],
+            note_date = n["note_date"],
+            note_txt  = n["note_txt"],
+        )
         for n in notes
     ]
+
+
+@router.patch(
+    "/{note_id}",
+    response_model=NoteDetail,
+    summary="Edit a note's text",
+)
+def update_note(note_id: int, req: NoteUpdateRequest, conn: DbConn, _: Auth):
+    try:
+        db.update_note(conn, note_id, req.note_txt)
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM notes WHERE note_id = ?", (note_id,)
+        ).fetchone()
+    except db.NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
+    except db.ValidationError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    return NoteDetail(note_id=row["note_id"], note_date=row["note_date"], note_txt=row["note_txt"])
+
+
+@router.delete(
+    "/{note_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a note",
+)
+def delete_note(note_id: int, conn: DbConn, _: Auth):
+    try:
+        db.delete_note(conn, note_id)
+        conn.commit()
+    except db.NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))

@@ -44,6 +44,14 @@ export const health = () => get('/health')
 
 // ── Recipes ───────────────────────────────────────────────────────────────
 export const searchRecipes       = q                => get(`/recipes/search?q=${encodeURIComponent(q)}`)
+export const searchIngredient    = (q, externalOnly = false) => get(`/recipes/ingredients/search?q=${encodeURIComponent(q)}${externalOnly ? '&external_only=true' : ''}`)
+export const searchIngredientLocal = q              => get(`/recipes/ingredients/local-search?q=${encodeURIComponent(q)}`)
+export const resolveIngredient    = body            => post('/recipes/ingredients/resolve', body)
+export const getIngredient        = id              => get(`/recipes/ingredients/${id}`)
+export const updateIngredient     = (id, body)      => patch(`/recipes/ingredients/${id}`, body)
+export const addRecipeComponent   = (id, body)      => post(`/recipes/${id}/components`, body)
+export const updateRecipeComponent = (id, cid, body) => patch(`/recipes/${id}/components/${cid}`, body)
+export const deleteRecipeComponent = (id, cid)      => del(`/recipes/${id}/components/${cid}`)
 export const getRecipe           = id               => get(`/recipes/${id}`)
 export const createRecipe        = body             => post('/recipes', body)
 export const updateRecipe        = (id, body)       => put(`/recipes/${id}`, body)
@@ -55,6 +63,12 @@ export const uploadRecipeImage   = (id, file)       => {
   const form = new FormData()
   form.append('file', file)
   return upload(`/recipes/${id}/image`, form)
+}
+export const extractRecipeFromUrl   = url          => post('/recipes/extract/url', { url })
+export const extractRecipeFromImage = file         => {
+  const form = new FormData()
+  form.append('file', file)
+  return upload('/recipes/extract/image', form)
 }
 
 // ── Batches ───────────────────────────────────────────────────────────────
@@ -87,3 +101,5 @@ export const getRangeNutrition    = (start, end)    => get(`/nutrition/range?sta
 // ── Notes ─────────────────────────────────────────────────────────────────
 export const addNote              = body            => post('/notes', body)
 export const getNotes             = params          => get(`/notes?${new URLSearchParams(params)}`)
+export const updateNote           = (id, body)      => patch(`/notes/${id}`, body)
+export const deleteNote           = id              => del(`/notes/${id}`)

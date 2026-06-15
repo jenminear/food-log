@@ -192,21 +192,70 @@ def find_ingredient_by_name(
 ) -> Optional[sqlite3.Row]:
     """
     Look up an ingredient by exact name (case-insensitive).
-    Returns the row or None if not found.
+    Ingredient names are not unique, so this returns the first match
+    (lowest ingredient_id) or None if not found.
     """
     return conn.execute(
-        "SELECT * FROM ingredients WHERE LOWER(ingredient_name) = LOWER(?)",
+        "SELECT * FROM ingredients WHERE LOWER(ingredient_name) = LOWER(?) "
+        "ORDER BY ingredient_id LIMIT 1",
         (name.strip(),),
     ).fetchone()
+
+
+def find_ingredient_by_source(
+    conn: sqlite3.Connection, source_food_name: str, portion_unit: str
+) -> Optional[sqlite3.Row]:
+    """
+    Look up an ingredient by its USDA/OFF source food name + portion unit
+    (case-insensitive). This is the de-duplication key for ingredients
+    created from external lookups: the same source food can be stored
+    multiple times under different portion units (e.g. "1 medium" vs
+    "1 large"), and the same source food + portion unit should always
+    resolve to the same ingredient regardless of its user-facing label.
+    """
+    return conn.execute(
+        "SELECT * FROM ingredients "
+        "WHERE LOWER(source_food_name) = LOWER(?) AND LOWER(portion_unit) = LOWER(?)",
+        (source_food_name.strip(), portion_unit.strip()),
+    ).fetchone()
+
+
+def find_ingredient_by_name_and_portion(
+    conn: sqlite3.Connection, ingredient_name: str, portion_unit: str
+) -> Optional[sqlite3.Row]:
+    """
+    Look up a manually-entered ingredient (source_food_name IS NULL) by
+    name + portion unit (case-insensitive). De-duplication key for
+    manual entries, which have no USDA/OFF source food name.
+    """
+    return conn.execute(
+        "SELECT * FROM ingredients "
+        "WHERE source_food_name IS NULL "
+        "AND LOWER(ingredient_name) = LOWER(?) AND LOWER(portion_unit) = LOWER(?)",
+        (ingredient_name.strip(), portion_unit.strip()),
+    ).fetchone()
+
+
+def get_ingredient(conn: sqlite3.Connection, ingredient_id: int) -> sqlite3.Row:
+    """
+    Look up an ingredient by its primary key.
+    Raises NotFoundError if it does not exist.
+    """
+    row = conn.execute(
+        "SELECT * FROM ingredients WHERE ingredient_id = ?", (ingredient_id,)
+    ).fetchone()
+    if row is None:
+        raise NotFoundError(f"Ingredient id={ingredient_id} not found.")
+    return row
 
 
 def create_ingredient(
     conn: sqlite3.Connection,
     ingredient_name: str,
-    portion_amount: float = 1.0,
     portion_unit: str = "g",
     *,
     portion_grams: float = 100.0,
+    source_food_name: Optional[str] = None,
     protein_grams: Optional[float] = None,
     fat_grams: Optional[float] = None,
     carb_grams: Optional[float] = None,
@@ -217,38 +266,37 @@ def create_ingredient(
     """
     Insert a new ingredient. All nutrition values are per 100g.
     Portion fields capture a typical serving size for unit conversion:
-      portion_amount=1, portion_unit="cup", portion_grams=90  →  1 cup = 90g
-    quantity_multiple in components means "number of portions."
+      portion_unit="1 cup", portion_grams=90  →  1 cup = 90g
+    quantity_multiple in components means "number of portion_units."
 
     Nutrition calculation:
       nutrient = quantity_multiple × (portion_grams / 100) × nutrient_per_100g
 
+    ingredient_name is a user-facing label and is NOT unique - multiple
+    ingredients may share a label (e.g. "apple" for a medium and a large
+    apple). source_food_name + portion_unit is the de-duplication key for
+    USDA/OFF-sourced ingredients; see find_or_create_ingredient().
+
     Returns the new ingredient_id.
-    Raises DuplicateError if the name already exists.
     """
     ingredient_name = ingredient_name.strip()
     if not ingredient_name:
         raise ValidationError("ingredient_name cannot be empty.")
-    if portion_amount <= 0:
-        raise ValidationError("portion_amount must be positive.")
     if not portion_unit.strip():
         raise ValidationError("portion_unit cannot be empty.")
     if portion_grams <= 0:
         raise ValidationError("portion_grams must be positive.")
 
-    if find_ingredient_by_name(conn, ingredient_name):
-        raise DuplicateError(f"Ingredient '{ingredient_name}' already exists.")
-
     cur = conn.execute(
         """
         INSERT INTO ingredients
-            (ingredient_name, portion_amount, portion_unit, portion_grams,
+            (ingredient_name, source_food_name, portion_unit, portion_grams,
              protein_grams, fat_grams, carb_grams, fiber_grams,
              calories, nutrition_info_source)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            ingredient_name, portion_amount, portion_unit, portion_grams,
+            ingredient_name, source_food_name, portion_unit, portion_grams,
             protein_grams, fat_grams, carb_grams, fiber_grams,
             calories, nutrition_info_source,
         ),
@@ -259,8 +307,9 @@ def create_ingredient(
 def find_or_create_ingredient(
     conn: sqlite3.Connection,
     ingredient_name: str,
-    portion_amount: float = 1.0,
     portion_unit: str = "g",
+    *,
+    source_food_name: Optional[str] = None,
     **kwargs,
 ) -> tuple[int, bool]:
     """
@@ -268,11 +317,25 @@ def find_or_create_ingredient(
     was inserted.  kwargs are passed through to create_ingredient (portion
     fields and nutrition values) and are only used when creating.
     This is the primary entry point when processing recipe ingredients.
+
+    De-duplication:
+      - If source_food_name is given (USDA/OFF candidate), an existing
+        ingredient with the same source_food_name + portion_unit is reused
+        regardless of its ingredient_name label.
+      - Otherwise (manual entry), an existing manually-entered ingredient
+        (source_food_name IS NULL) with the same ingredient_name + portion_unit
+        is reused.
     """
-    row = find_ingredient_by_name(conn, ingredient_name)
+    if source_food_name:
+        row = find_ingredient_by_source(conn, source_food_name, portion_unit)
+    else:
+        row = find_ingredient_by_name_and_portion(conn, ingredient_name, portion_unit)
     if row:
         return row["ingredient_id"], False
-    ingredient_id = create_ingredient(conn, ingredient_name, portion_amount, portion_unit, **kwargs)
+    ingredient_id = create_ingredient(
+        conn, ingredient_name, portion_unit,
+        source_food_name=source_food_name, **kwargs,
+    )
     return ingredient_id, True
 
 
@@ -280,7 +343,6 @@ def update_ingredient_nutrition(
     conn: sqlite3.Connection,
     ingredient_id: int,
     *,
-    portion_amount: Optional[float] = None,
     portion_unit: Optional[str] = None,
     portion_grams: Optional[float] = None,
     protein_grams: Optional[float] = None,
@@ -296,7 +358,6 @@ def update_ingredient_nutrition(
     Raises NotFoundError if the ingredient does not exist.
     """
     fields = {
-        "portion_amount": portion_amount,
         "portion_unit": portion_unit,
         "portion_grams": portion_grams,
         "protein_grams": protein_grams,
@@ -396,7 +457,7 @@ def get_components(
     return conn.execute(
         f"""
         SELECT c.*, i.ingredient_name,
-               i.portion_amount, i.portion_unit, i.portion_grams,
+               i.portion_unit, i.portion_grams,
                i.protein_grams, i.fat_grams, i.carb_grams,
                i.fiber_grams, i.calories
         FROM   components c
@@ -775,6 +836,38 @@ def get_notes(
     ).fetchall()
 
 
+def update_note(conn: sqlite3.Connection, note_id: int, note_txt: str) -> None:
+    """
+    Update a note's text.
+    Raises NotFoundError if the note does not exist.
+    Raises ValidationError if note_txt is blank.
+    """
+    note_txt = note_txt.strip()
+    if not note_txt:
+        raise ValidationError("note_txt cannot be empty.")
+    row = conn.execute(
+        "SELECT 1 FROM notes WHERE note_id = ?", (note_id,)
+    ).fetchone()
+    if row is None:
+        raise NotFoundError(f"Note id={note_id} not found.")
+    conn.execute(
+        "UPDATE notes SET note_txt = ? WHERE note_id = ?", (note_txt, note_id)
+    )
+
+
+def delete_note(conn: sqlite3.Connection, note_id: int) -> None:
+    """
+    Delete a note.
+    Raises NotFoundError if the note does not exist.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM notes WHERE note_id = ?", (note_id,)
+    ).fetchone()
+    if row is None:
+        raise NotFoundError(f"Note id={note_id} not found.")
+    conn.execute("DELETE FROM notes WHERE note_id = ?", (note_id,))
+
+
 # ===========================================================================
 # NUTRITION QUERIES
 # ===========================================================================
@@ -869,7 +962,6 @@ def get_daily_nutrition(
                 comp_list.append({
                     "ingredient_name":  c["ingredient_name"],
                     "quantity_multiple": c["quantity_multiple"] * frac,
-                    "portion_amount":   c["portion_amount"],
                     "portion_unit":     c["portion_unit"],
                     "portion_grams":    c["portion_grams"],
                 })
@@ -888,7 +980,6 @@ def get_daily_nutrition(
                 comp_list.append({
                     "ingredient_name":  c["ingredient_name"],
                     "quantity_multiple": c["quantity_multiple"],
-                    "portion_amount":   c["portion_amount"],
                     "portion_unit":     c["portion_unit"],
                     "portion_grams":    c["portion_grams"],
                 })

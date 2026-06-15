@@ -191,7 +191,7 @@ class AddRecipeSession:
             choice:       1-based index into the candidates list, or None
                           if the user wants to enter data manually
             manual_data:  if choice is None, a dict of ingredient fields:
-                          {ingredient_name, portion_amount, portion_unit,
+                          {ingredient_name, portion_unit,
                            portion_grams, calories, protein_grams,
                            fat_grams, carb_grams, fiber_grams}
 
@@ -924,7 +924,6 @@ def _format_components(components) -> list[dict]:
             "ingredient_id":   c["ingredient_id"],
             "ingredient_name": c["ingredient_name"],
             "quantity_multiple": c["quantity_multiple"],
-            "portion_amount":  c["portion_amount"],
             "portion_unit":    c["portion_unit"],
             "portion_grams":   c["portion_grams"],
         })

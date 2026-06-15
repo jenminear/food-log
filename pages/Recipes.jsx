@@ -1,73 +1,176 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { searchRecipes, createRecipe, finishRecipe,
-         addRecipeIngredient, confirmRecipeIngredient } from './api.js'
+import { searchRecipes, createRecipe, finishRecipe, updateRecipe, extractRecipeFromUrl, extractRecipeFromImage } from './api.js'
 
 export default function Recipes() {
   const navigate = useNavigate()
-  const [q, setQ]           = useState('')
+  const [q, setQ] = useState('')
   const [results, setResults] = useState([])
-  const [error, setError]   = useState(null)
+  const [error, setError] = useState(null)
 
-  // New recipe form
-  const [showForm, setShowForm]     = useState(false)
+  // New recipe form - basic fields
+  const [showForm, setShowForm] = useState(false)
   const [recipeName, setRecipeName] = useState('')
-  const [session, setSession]       = useState(null)  // {session_key, recipe_id}
-  const [ingredient, setIngredient] = useState('')
-  const [qty, setQty]               = useState('1')
-  const [ingStatus, setIngStatus]   = useState(null)  // result from API
-  const [saving, setSaving]         = useState(false)
+  const [numServings, setNumServings] = useState('')
+  const [activeHours, setActiveHours] = useState('0')
+  const [activeMins, setActiveMins] = useState('0')
+  const [totalHours, setTotalHours] = useState('0')
+  const [totalMins, setTotalMins] = useState('0')
+  const [needOven, setNeedOven] = useState(false)
+  const [vegetarian, setVegetarian] = useState(false)
+  const [vegan, setVegan] = useState(false)
+
+  // URL and Picture modals
+  const [showUrlModal, setShowUrlModal] = useState(false)
+  const [showPictureModal, setShowPictureModal] = useState(false)
+  const [recipeUrl, setRecipeUrl] = useState('')
+  const [recipePicture, setRecipePicture] = useState(null)
+  const [extracting, setExtracting] = useState(false)
+
+  // Ingredients/steps extracted via AI, applied after the recipe is created
+  const [extractedIngredients, setExtractedIngredients] = useState([])
+  const [extractedSteps, setExtractedSteps] = useState([])
+
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (q.trim().length < 2) { setResults([]); return }
     searchRecipes(q).then(setResults).catch(() => setResults([]))
   }, [q])
 
+  // Validate URL
+  function isValidUrl(string) {
+    try {
+      const url = new URL(string)
+      return url.protocol === 'http:' || url.protocol === 'https:'
+    } catch (_) {
+      return false
+    }
+  }
+
+  // Apply AI-extracted recipe data to the New Recipe form
+  function applyExtracted(extracted) {
+    if (extracted.recipe_name) setRecipeName(extracted.recipe_name)
+    if (extracted.num_servings) setNumServings(String(extracted.num_servings))
+    if (extracted.active_time_mins != null) {
+      setActiveHours(String(Math.floor(extracted.active_time_mins / 60)))
+      setActiveMins(String(extracted.active_time_mins % 60))
+    }
+    if (extracted.total_time_mins != null) {
+      setTotalHours(String(Math.floor(extracted.total_time_mins / 60)))
+      setTotalMins(String(extracted.total_time_mins % 60))
+    }
+    setNeedOven(!!extracted.need_oven)
+    setVegetarian(!!extracted.vegetarian)
+    setVegan(!!extracted.vegan)
+    setExtractedIngredients(extracted.ingredients || [])
+    setExtractedSteps(extracted.steps || [])
+    setShowForm(true)
+  }
+
+  async function handleUrlSubmit() {
+    if (!isValidUrl(recipeUrl)) {
+      setError('Please enter a valid URL starting with http:// or https://')
+      return
+    }
+    setExtracting(true)
+    setError(null)
+    try {
+      const extracted = await extractRecipeFromUrl(recipeUrl)
+      applyExtracted(extracted)
+      setShowUrlModal(false)
+    } catch (e) {
+      setError('Failed to extract recipe: ' + e.message)
+    } finally {
+      setExtracting(false)
+    }
+  }
+
+  async function handlePictureSubmit() {
+    if (!recipePicture) {
+      setError('Please select a picture')
+      return
+    }
+    setExtracting(true)
+    setError(null)
+    try {
+      const extracted = await extractRecipeFromImage(recipePicture)
+      applyExtracted(extracted)
+      setShowPictureModal(false)
+      setRecipePicture(null)
+    } catch (e) {
+      setError('Failed to extract recipe: ' + e.message)
+    } finally {
+      setExtracting(false)
+    }
+  }
+
+  // ========== CREATE RECIPE ==========
+
   async function handleCreateRecipe() {
-    if (!recipeName.trim()) return
-    setSaving(true); setError(null)
-    try {
-      const data = await createRecipe({ recipe_name: recipeName })
-      setSession(data)
-    } catch(e) { setError(e.message) }
-    finally { setSaving(false) }
-  }
+    if (!recipeName.trim()) {
+      setError('Recipe name is required')
+      return
+    }
 
-  async function handleAddIngredient() {
-    if (!ingredient.trim() || !session) return
-    setSaving(true); setIngStatus(null)
-    try {
-      const data = await addRecipeIngredient(session.session_key, {
-        ingredient_name: ingredient, quantity_multiple: parseFloat(qty) || 1
-      })
-      setIngStatus(data)
-      if (data.status === 'added') { setIngredient(''); setQty('1') }
-    } catch(e) { setError(e.message) }
-    finally { setSaving(false) }
-  }
-
-  async function handleConfirm(choice) {
-    if (!ingStatus?.pending_key) return
     setSaving(true)
-    try {
-      const data = await confirmRecipeIngredient(session.session_key, {
-        pending_key: ingStatus.pending_key, choice
-      })
-      setIngStatus(data)
-      if (data.status === 'added') { setIngredient(''); setQty('1'); setIngStatus(null) }
-    } catch(e) { setError(e.message) }
-    finally { setSaving(false) }
-  }
+    setError(null)
 
-  async function handleFinish() {
-    if (!session) return
-    setSaving(true)
     try {
+      const activeMinsTotal = parseInt(activeHours) * 60 + parseInt(activeMins)
+      const totalMinsTotal = parseInt(totalHours) * 60 + parseInt(totalMins)
+
+      const session = await createRecipe({
+        recipe_name: recipeName,
+        num_servings: numServings ? parseFloat(numServings) : null,
+        active_time_mins: activeMinsTotal || null,
+        total_time_mins: totalMinsTotal || null,
+        need_oven: needOven,
+        vegetarian: vegetarian,
+        vegan: vegan,
+        source: recipeUrl || null
+      })
+
       await finishRecipe(session.session_key)
-      setSession(null); setShowForm(false); setRecipeName('')
-      navigate(`/recipes/${session.recipe_id}`)
-    } catch(e) { setError(e.message) }
-    finally { setSaving(false) }
+
+      if (extractedSteps.length > 0) {
+        await updateRecipe(session.recipe_id, {
+          recipe_name:      recipeName,
+          steps_txt:        JSON.stringify(extractedSteps),
+          num_servings:     numServings ? parseFloat(numServings) : null,
+          active_time_mins: activeMinsTotal || null,
+          total_time_mins:  totalMinsTotal || null,
+          need_oven:        needOven,
+          vegetarian:       vegetarian,
+          vegan:            vegan,
+          source:           recipeUrl || null,
+        })
+      }
+
+      const pendingIngredients = extractedIngredients
+      resetForm()
+      navigate(`/recipes/${session.recipe_id}`, { state: { pendingIngredients } })
+    } catch (e) {
+      setError('Failed to create recipe: ' + e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function resetForm() {
+    setShowForm(false)
+    setRecipeName('')
+    setNumServings('')
+    setActiveHours('0')
+    setActiveMins('0')
+    setTotalHours('0')
+    setTotalMins('0')
+    setNeedOven(false)
+    setVegetarian(false)
+    setVegan(false)
+    setRecipeUrl('')
+    setExtractedIngredients([])
+    setExtractedSteps([])
   }
 
   return (
@@ -81,66 +184,215 @@ export default function Recipes() {
 
       {error && <div className="alert alert-error">{error}</div>}
 
-      {showForm && !session && (
+      {/* URL Modal */}
+      {showUrlModal && (
+        <div className="modal-overlay" onClick={() => setShowUrlModal(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h3>Enter Recipe URL</h3>
+            <div className="form-group">
+              <label>Web Address</label>
+              <input
+                type="url"
+                value={recipeUrl}
+                onChange={e => setRecipeUrl(e.target.value)}
+                placeholder="https://example.com/recipe"
+              />
+            </div>
+            {extracting && (
+              <div className="text-sm text-faint" style={{marginBottom:'0.5rem'}}>
+                Extracting recipe… this can take up to 30 seconds.
+              </div>
+            )}
+            <div style={{display:'flex', gap:'0.5rem', justifyContent:'flex-end'}}>
+              <button className="btn btn-secondary" onClick={() => setShowUrlModal(false)} disabled={extracting}>
+                Cancel
+              </button>
+              <button className="btn btn-primary" onClick={handleUrlSubmit} disabled={extracting}>
+                {extracting ? 'Extracting…' : 'Extract Recipe'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Picture Modal */}
+      {showPictureModal && (
+        <div className="modal-overlay" onClick={() => setShowPictureModal(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h3>Upload Recipe Picture</h3>
+            <div className="form-group">
+              <label>Select Picture</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={e => setRecipePicture(e.target.files[0])}
+              />
+            </div>
+            {extracting && (
+              <div className="text-sm text-faint" style={{marginBottom:'0.5rem'}}>
+                Extracting recipe… this can take up to 30 seconds.
+              </div>
+            )}
+            <div style={{display:'flex', gap:'0.5rem', justifyContent:'flex-end'}}>
+              <button className="btn btn-secondary" onClick={() => setShowPictureModal(false)} disabled={extracting}>
+                Cancel
+              </button>
+              <button className="btn btn-primary" onClick={handlePictureSubmit} disabled={extracting}>
+                {extracting ? 'Extracting…' : 'Extract Recipe'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* New Recipe Form */}
+      {showForm && (
         <div className="card">
           <h2 style={{marginBottom:'1rem'}}>New Recipe</h2>
-          <div className="form-group">
-            <label>Recipe Name</label>
-            <input type="text" value={recipeName} onChange={e => setRecipeName(e.target.value)}
-                   placeholder="e.g. Veggie Bowl" />
+
+          {/* Quick Action Buttons */}
+          <div style={{display:'flex', gap:'0.5rem', marginBottom:'1rem'}}>
+            <button className="btn btn-secondary" onClick={() => setShowUrlModal(true)}>
+              From Web Address
+            </button>
+            <button className="btn btn-secondary" onClick={() => setShowPictureModal(true)}>
+              From Picture
+            </button>
           </div>
-          <button className="btn btn-primary" onClick={handleCreateRecipe} disabled={saving}>
-            Create &amp; Add Ingredients
+
+          {/* Recipe Name */}
+          <div className="form-group">
+            <label>Recipe Name <span style={{color:'red'}}>*</span></label>
+            <input
+              type="text"
+              value={recipeName}
+              onChange={e => setRecipeName(e.target.value)}
+              placeholder="e.g. Veggie Bowl"
+              required
+            />
+          </div>
+
+          {/* Number of Servings */}
+          <div className="form-group">
+            <label>Number of Servings</label>
+            <input
+              type="number"
+              value={numServings}
+              onChange={e => setNumServings(e.target.value)}
+              placeholder="e.g. 4"
+              min="0.1"
+              step="0.1"
+            />
+          </div>
+
+          {/* Active Time */}
+          <div className="form-group">
+            <label>Active Time</label>
+            <div style={{display:'flex', gap:'0.5rem', alignItems:'center'}}>
+              <input
+                type="number"
+                value={activeHours}
+                onChange={e => setActiveHours(e.target.value)}
+                min="0"
+                style={{width:'5rem'}}
+              />
+              <span>hours</span>
+              <input
+                type="number"
+                value={activeMins}
+                onChange={e => setActiveMins(e.target.value)}
+                min="0"
+                max="59"
+                style={{width:'5rem'}}
+              />
+              <span>minutes</span>
+            </div>
+          </div>
+
+          {/* Total Time */}
+          <div className="form-group">
+            <label>Total Time</label>
+            <div style={{display:'flex', gap:'0.5rem', alignItems:'center'}}>
+              <input
+                type="number"
+                value={totalHours}
+                onChange={e => setTotalHours(e.target.value)}
+                min="0"
+                style={{width:'5rem'}}
+              />
+              <span>hours</span>
+              <input
+                type="number"
+                value={totalMins}
+                onChange={e => setTotalMins(e.target.value)}
+                min="0"
+                max="59"
+                style={{width:'5rem'}}
+              />
+              <span>minutes</span>
+            </div>
+          </div>
+
+          {/* Yes/No Toggles */}
+          <div className="form-group">
+            <label style={{display:'flex', alignItems:'center', gap:'0.5rem', cursor:'pointer'}}>
+              <input
+                type="checkbox"
+                checked={needOven}
+                onChange={e => setNeedOven(e.target.checked)}
+                style={{width:'auto'}}
+              />
+              Needs Oven?
+            </label>
+          </div>
+
+          <div className="form-group">
+            <label style={{display:'flex', alignItems:'center', gap:'0.5rem', cursor:'pointer'}}>
+              <input
+                type="checkbox"
+                checked={vegetarian}
+                onChange={e => setVegetarian(e.target.checked)}
+                style={{width:'auto'}}
+              />
+              Vegetarian?
+            </label>
+          </div>
+
+          <div className="form-group">
+            <label style={{display:'flex', alignItems:'center', gap:'0.5rem', cursor:'pointer'}}>
+              <input
+                type="checkbox"
+                checked={vegan}
+                onChange={e => setVegan(e.target.checked)}
+                style={{width:'auto'}}
+              />
+              Vegan?
+            </label>
+          </div>
+
+          {(extractedIngredients.length > 0 || extractedSteps.length > 0) && (
+            <div className="alert alert-success" style={{marginBottom:'1rem'}}>
+              Extracted {extractedSteps.length} step{extractedSteps.length === 1 ? '' : 's'} and{' '}
+              {extractedIngredients.length} ingredient{extractedIngredients.length === 1 ? '' : 's'}.
+              After creating the recipe, you'll be walked through adding each ingredient.
+            </div>
+          )}
+
+          <div className="divider"></div>
+
+          {/* Create Recipe Button */}
+          <button
+            className="btn btn-primary"
+            onClick={handleCreateRecipe}
+            disabled={saving || !recipeName.trim()}
+            style={{width:'100%', padding:'0.75rem', fontSize:'0.9rem'}}
+          >
+            {saving ? 'Creating Recipe...' : 'Create Recipe'}
           </button>
         </div>
       )}
 
-      {session && (
-        <div className="card">
-          <div className="card-header">
-            <h2>Adding ingredients to: {recipeName}</h2>
-            <button className="btn btn-primary" onClick={handleFinish} disabled={saving}>
-              Finish Recipe
-            </button>
-          </div>
-
-          {ingStatus?.status === 'needs_confirmation' && (
-            <div className="alert alert-warn" style={{marginBottom:'1rem'}}>
-              Low confidence — pick a match:
-              <div className="candidate-list mt-1">
-                {ingStatus.candidates?.map((c, i) => (
-                  <div key={i} className="candidate-item" onClick={() => handleConfirm(i+1)}>
-                    <span className="candidate-num">{i+1}</span>
-                    <div>
-                      <div className="candidate-name">{c.ingredient_name}</div>
-                      <div className="candidate-meta">{c.calories} kcal · {c.portion_amount} {c.portion_unit}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="form-row" style={{alignItems:'flex-end'}}>
-            <div className="form-group" style={{margin:0}}>
-              <label>Ingredient</label>
-              <input type="text" value={ingredient} onChange={e => setIngredient(e.target.value)}
-                     placeholder="e.g. rolled oats" />
-            </div>
-            <div className="form-group" style={{margin:0, maxWidth:'7rem'}}>
-              <label>Qty ×</label>
-              <input type="number" value={qty} onChange={e => setQty(e.target.value)} min="0.1" step="0.1" />
-            </div>
-            <button className="btn btn-secondary" onClick={handleAddIngredient} disabled={saving}>
-              Add
-            </button>
-          </div>
-          {ingStatus?.status === 'added' && (
-            <div className="alert alert-success mt-1">✓ {ingStatus.ingredient_name} added</div>
-          )}
-        </div>
-      )}
-
+      {/* Search existing recipes */}
       <div className="card">
         <div className="form-group" style={{margin:0}}>
           <input type="text" value={q} onChange={e => setQ(e.target.value)}

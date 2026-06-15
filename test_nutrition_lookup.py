@@ -190,8 +190,7 @@ def _make_result(**kwargs) -> NL.NutritionResult:
         source="usda",
         source_id="12345",
         source_url="https://example.com",
-        portion_amount=1.0,
-        portion_unit="cup",
+        portion_unit="1 cup",
         portion_grams=90.0,
         calories=379.0,
         protein_grams=13.15,
@@ -252,19 +251,19 @@ class TestNutritionResult(unittest.TestCase):
         r = _make_result()
         kwargs = NL.result_to_db_kwargs(r)
         expected_keys = {
-            "portion_amount", "portion_unit", "portion_grams",
+            "portion_unit", "portion_grams",
             "calories", "protein_grams", "fat_grams",
-            "carb_grams", "fiber_grams", "nutrition_info_source",
+            "carb_grams", "fiber_grams", "source_food_name", "nutrition_info_source",
         }
         self.assertEqual(set(kwargs.keys()), expected_keys)
 
     def test_result_to_db_kwargs_values(self):
         r = _make_result(calories=379.0, portion_grams=90.0,
-                         source_url="https://fdc.nal.usda.gov/123")
+                         ingredient_name="Oats, raw", source="usda")
         kwargs = NL.result_to_db_kwargs(r)
         self.assertEqual(kwargs["calories"], 379.0)
         self.assertEqual(kwargs["portion_grams"], 90.0)
-        self.assertEqual(kwargs["nutrition_info_source"], "https://fdc.nal.usda.gov/123")
+        self.assertEqual(kwargs["nutrition_info_source"], "USDA: Oats, raw")
 
 
 class TestShouldAutoPick(unittest.TestCase):
@@ -343,22 +342,21 @@ class TestExtractUsdaNutrients(unittest.TestCase):
 class TestExtractUsdaPortions(unittest.TestCase):
 
     def test_prefers_cup_over_tbsp(self):
-        pa, pu, pg, all_p = NL._extract_usda_portions(USDA_DETAIL_RESPONSE)
+        pu, pg, all_p = NL._extract_usda_portions(USDA_DETAIL_RESPONSE)
         self.assertEqual(pu, "1 cup")
         self.assertAlmostEqual(pg, 90.0)
-        self.assertEqual(pa, 1.0)
 
-    def test_falls_back_to_100g_when_no_portions(self):
-        pa, pu, pg, all_p = NL._extract_usda_portions(USDA_DETAIL_NO_PORTIONS)
-        self.assertAlmostEqual(pg, 100.0)
+    def test_falls_back_to_grams_when_no_portions(self):
+        pu, pg, all_p = NL._extract_usda_portions(USDA_DETAIL_NO_PORTIONS)
+        self.assertAlmostEqual(pg, 1.0)
         self.assertEqual(pu, "g")
 
     def test_all_portions_populated(self):
-        _, _, _, all_p = NL._extract_usda_portions(USDA_DETAIL_RESPONSE)
+        _, _, all_p = NL._extract_usda_portions(USDA_DETAIL_RESPONSE)
         self.assertEqual(len(all_p), 3)
 
     def test_branded_food_uses_serving_size(self):
-        pa, pu, pg, all_p = NL._extract_usda_portions(USDA_BRANDED_DETAIL)
+        pu, pg, all_p = NL._extract_usda_portions(USDA_BRANDED_DETAIL)
         self.assertAlmostEqual(pg, 170.0)
         self.assertEqual(pu, "g")
 
@@ -425,25 +423,24 @@ class TestExtractOffPortions(unittest.TestCase):
 
     def test_parses_gram_serving_size(self):
         product = {"serving_size": "40 g"}
-        pa, pu, pg, all_p = NL._extract_off_portions(product)
+        pu, pg, all_p = NL._extract_off_portions(product)
         self.assertAlmostEqual(pg, 40.0)
-        self.assertAlmostEqual(pa, 1.0)
 
     def test_parses_ml_serving_size(self):
         product = {"serving_size": "240 ml"}
-        pa, pu, pg, _ = NL._extract_off_portions(product)
+        pu, pg, _ = NL._extract_off_portions(product)
         self.assertAlmostEqual(pg, 240.0)
         self.assertEqual(pu, "ml")
 
     def test_no_serving_size_falls_back_to_100g(self):
         product = {"serving_size": ""}
-        pa, pu, pg, _ = NL._extract_off_portions(product)
+        pu, pg, _ = NL._extract_off_portions(product)
         self.assertAlmostEqual(pg, 100.0)
         self.assertEqual(pu, "g")
 
     def test_complex_serving_size_string(self):
         product = {"serving_size": "1 cup (240ml)"}
-        pa, pu, pg, _ = NL._extract_off_portions(product)
+        pu, pg, _ = NL._extract_off_portions(product)
         self.assertAlmostEqual(pg, 240.0)
 
 
@@ -732,7 +729,6 @@ class TestIntegrationUSDA(unittest.TestCase):
         # Top result should have had its detail fetched with portion info
         top = results[0]
         self.assertNotEqual(top.portion_unit, "g")  # Should be "cup" or similar
-        self.assertAlmostEqual(top.portion_amount, 1.0)
 
     def test_broccoli_exact_match_high_confidence(self):
         results = NL._search_usda("broccoli", api_key=NL._get_usda_api_key())

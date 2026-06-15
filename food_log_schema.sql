@@ -38,9 +38,13 @@ CREATE TABLE IF NOT EXISTS recipes (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ingredients (
     ingredient_id           INTEGER PRIMARY KEY AUTOINCREMENT,  -- [R]
-    ingredient_name         VARCHAR(255) NOT NULL UNIQUE,       -- canonical name from data source
-    portion_amount          REAL    NOT NULL DEFAULT 1.0,       -- the "1" in "1 cup"  e.g. 1.0
-    portion_unit            VARCHAR(50) NOT NULL DEFAULT 'g',   -- unit label e.g. "cup", "oz", "large egg"
+    ingredient_name         VARCHAR(255) NOT NULL,              -- user-facing label (not unique - multiple
+                                                                 -- ingredients may share a label, e.g. "apple"
+                                                                 -- for both a medium and a large apple)
+    source_food_name        VARCHAR(255),                       -- canonical food name from USDA/OFF, if any;
+                                                                 -- combined with portion_unit this determines
+                                                                 -- de-duplication for USDA/OFF-sourced ingredients
+    portion_unit            VARCHAR(50) NOT NULL DEFAULT 'g',   -- full portion description e.g. "1 cup", "1 medium stalk"
     portion_grams           REAL    NOT NULL DEFAULT 100.0,     -- grams per one portion e.g. 90.0
     protein_grams           REAL,                               -- per 100g
     fat_grams               REAL,                               -- per 100g

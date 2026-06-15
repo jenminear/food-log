@@ -44,16 +44,21 @@ class ComponentSummary(BaseModel):
     ingredient_id:    int
     ingredient_name:  str
     quantity_multiple: float
-    portion_amount:   float
     portion_unit:     str
     portion_grams:    float
+    # Per-100g nutrition values from the ingredients table, used by the
+    # client to compute recipe-specific totals (value * portion_grams/100 * quantity_multiple)
+    calories:         Optional[float] = None
+    protein_grams:    Optional[float] = None
+    fat_grams:        Optional[float] = None
+    carb_grams:       Optional[float] = None
+    fiber_grams:      Optional[float] = None
 
 
 class NutritionCandidate(BaseModel):
     """A candidate nutrition result returned for user confirmation."""
     ingredient_name:      str
     summary:              str
-    portion_amount:       float
     portion_unit:         str
     portion_grams:        float
     calories:             Optional[float] = None
@@ -92,6 +97,31 @@ class RecipeResponse(BaseModel):
     vegetarian:       bool
     source:           Optional[str]
     picture_path:     Optional[str]
+    components:       list[ComponentSummary] = []
+
+
+class ExtractedIngredient(BaseModel):
+    """One ingredient as written in a source recipe (before USDA resolution)."""
+    name:     str
+    quantity: Optional[float] = None
+    unit:     Optional[str] = None
+
+
+class ExtractedRecipeResponse(BaseModel):
+    """Structured recipe data extracted from a URL or image via AI."""
+    recipe_name:      Optional[str] = None
+    num_servings:     Optional[float] = None
+    active_time_mins: Optional[int] = None
+    total_time_mins:  Optional[int] = None
+    need_oven:        bool = False
+    vegetarian:       bool = False
+    vegan:            bool = False
+    ingredients:      list[ExtractedIngredient] = []
+    steps:            list[str] = []
+
+
+class RecipeUrlRequest(BaseModel):
+    url: str = Field(..., min_length=1)
 
 
 class RecipeSummary(BaseModel):
@@ -132,6 +162,67 @@ class IngredientResult(BaseModel):
     component_id:    Optional[int]  = None
     candidates:      Optional[list[NutritionCandidate]] = None
     pending_key:     Optional[str]  = None
+
+
+class IngredientSummary(BaseModel):
+    """A single ingredient from the local database (local-search results)."""
+    ingredient_id:   int
+    ingredient_name: str
+    portion_unit:    str
+    portion_grams:   float
+    calories:        Optional[float] = None
+    protein_grams:   Optional[float] = None
+    fat_grams:       Optional[float] = None
+    carb_grams:      Optional[float] = None
+    fiber_grams:     Optional[float] = None
+
+
+class IngredientDetailResponse(IngredientSummary):
+    """Full ingredient detail, including its data source — for the edit modal."""
+    source_food_name: Optional[str] = None
+    nutrition_info_source: Optional[str] = None
+
+
+class IngredientUpdateRequest(BaseModel):
+    """PATCH body for editing an ingredient's nutrition/portion fields."""
+    ingredient_name:       Optional[str]   = Field(None, min_length=1)
+    portion_unit:          Optional[str]   = Field(None, min_length=1)
+    portion_grams:         Optional[float] = Field(None, gt=0)
+    calories:              Optional[float] = None
+    protein_grams:         Optional[float] = None
+    fat_grams:             Optional[float] = None
+    carb_grams:            Optional[float] = None
+    fiber_grams:           Optional[float] = None
+    nutrition_info_source: Optional[str]   = None
+
+
+class IngredientResolveRequest(BaseModel):
+    """
+    Persist a USDA candidate or manually-entered ingredient to the
+    ingredients table (find-or-create), prior to adding a component.
+    """
+    ingredient_name: str          = Field(..., min_length=1)
+    candidate:       Optional[dict] = None
+    manual_data:     Optional[dict] = None
+
+    @model_validator(mode="after")
+    def candidate_or_manual(self) -> "IngredientResolveRequest":
+        if self.candidate is None and self.manual_data is None:
+            raise ValueError("Provide either 'candidate' or 'manual_data'.")
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Components (recipe-level)
+# ---------------------------------------------------------------------------
+
+class ComponentAddRequest(BaseModel):
+    ingredient_id:     int   = Field(..., ge=1)
+    quantity_multiple: float = Field(..., gt=0)
+
+
+class ComponentUpdateRequest(BaseModel):
+    quantity_multiple: float = Field(..., gt=0)
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +393,16 @@ class NoteRequest(BaseModel):
 class NoteResponse(BaseModel):
     note_id:   int
     note_date: str
+
+
+class NoteUpdateRequest(BaseModel):
+    note_txt: str = Field(..., min_length=1)
+
+
+class NoteDetail(BaseModel):
+    note_id:   int
+    note_date: str
+    note_txt:  str
 
 
 # ---------------------------------------------------------------------------

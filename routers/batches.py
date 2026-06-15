@@ -147,7 +147,6 @@ def get_batch(batch_id: int, conn: DbConn, _: Auth):
             ingredient_id    = c["ingredient_id"],
             ingredient_name  = c["ingredient_name"],
             quantity_multiple = c["quantity_multiple"],
-            portion_amount   = c["portion_amount"],
             portion_unit     = c["portion_unit"],
             portion_grams    = c["portion_grams"],
         )

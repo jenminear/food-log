@@ -93,25 +93,41 @@ def test_get_recipe_not_found():
 
 def test_create_ingredient():
     conn = make_conn()
-    iid = D.create_ingredient(conn, "Oats", 100, "g",
+    iid = D.create_ingredient(conn, "Oats", "g",
                                protein_grams=17, calories=389)
     assert iid > 0
     row = D.find_ingredient_by_name(conn, "oats")  # case-insensitive
     assert row is not None
     assert row["calories"] == 389
 
+def test_get_ingredient():
+    conn = make_conn()
+    iid = D.create_ingredient(conn, "Oats", "g", protein_grams=17, calories=389)
+    row = D.get_ingredient(conn, iid)
+    assert row["ingredient_id"] == iid
+    assert row["ingredient_name"] == "Oats"
+    assert row["calories"] == 389
+
+def test_get_ingredient_not_found():
+    conn = make_conn()
+    try:
+        D.get_ingredient(conn, 9999)
+        assert False, "expected NotFoundError"
+    except D.NotFoundError:
+        pass
+
 def test_find_or_create_ingredient():
     conn = make_conn()
-    iid1, created1 = D.find_or_create_ingredient(conn, "Milk", 240, "ml",
+    iid1, created1 = D.find_or_create_ingredient(conn, "Milk", "ml",
                                                    protein_grams=8, calories=150)
     assert created1 is True
-    iid2, created2 = D.find_or_create_ingredient(conn, "Milk", 240, "ml")
+    iid2, created2 = D.find_or_create_ingredient(conn, "Milk", "ml")
     assert created2 is False
     assert iid1 == iid2
 
 def test_update_ingredient_nutrition():
     conn = make_conn()
-    iid = D.create_ingredient(conn, "Honey", 21, "g")
+    iid = D.create_ingredient(conn, "Honey", "g")
     D.update_ingredient_nutrition(conn, iid, calories=64, carb_grams=17)
     row = conn.execute(
         "SELECT * FROM ingredients WHERE ingredient_id = ?", (iid,)
@@ -120,9 +136,9 @@ def test_update_ingredient_nutrition():
 
 def test_search_ingredients():
     conn = make_conn()
-    D.create_ingredient(conn, "Almond Flour", 28, "g")
-    D.create_ingredient(conn, "Almond Milk", 240, "ml")
-    D.create_ingredient(conn, "Oat Flour", 30, "g")
+    D.create_ingredient(conn, "Almond Flour", "g")
+    D.create_ingredient(conn, "Almond Milk", "ml")
+    D.create_ingredient(conn, "Oat Flour", "g")
     r = D.search_ingredients(conn, "almond")
     assert len(r) == 2
 
@@ -132,7 +148,7 @@ def test_search_ingredients():
 def test_add_and_get_components():
     conn = make_conn()
     rid = D.create_recipe(conn, "Porridge")
-    iid = D.create_ingredient(conn, "Oats", 100, "g", calories=389)
+    iid = D.create_ingredient(conn, "Oats", "g", calories=389)
     cid = D.add_component(conn, iid, 1.5, recipe_id=rid)
     assert cid > 0
     comps = D.get_components(conn, recipe_id=rid)
@@ -141,7 +157,7 @@ def test_add_and_get_components():
 
 def test_component_requires_one_parent():
     conn = make_conn()
-    iid = D.create_ingredient(conn, "Butter", 14, "g")
+    iid = D.create_ingredient(conn, "Butter", "g")
     try:
         D.add_component(conn, iid, 1.0)  # no parent
         assert False
@@ -151,7 +167,7 @@ def test_component_requires_one_parent():
 def test_remove_component():
     conn = make_conn()
     rid = D.create_recipe(conn, "Toast")
-    iid = D.create_ingredient(conn, "Bread", 30, "g")
+    iid = D.create_ingredient(conn, "Bread", "g")
     cid = D.add_component(conn, iid, 2.0, recipe_id=rid)
     D.remove_component(conn, cid)
     assert D.get_components(conn, recipe_id=rid) == []
@@ -159,7 +175,7 @@ def test_remove_component():
 def test_update_component_quantity():
     conn = make_conn()
     rid = D.create_recipe(conn, "Scrambled Eggs")
-    iid = D.create_ingredient(conn, "Eggs", 50, "g")
+    iid = D.create_ingredient(conn, "Eggs", "g")
     cid = D.add_component(conn, iid, 2.0, recipe_id=rid)
     D.update_component_quantity(conn, cid, 3.0)
     comps = D.get_components(conn, recipe_id=rid)
@@ -188,8 +204,8 @@ def test_get_latest_batch():
 def test_batch_ingredient_modification():
     conn = make_conn()
     rid = D.create_recipe(conn, "Granola")
-    iid_oats  = D.create_ingredient(conn, "Rolled Oats", 100, "g", calories=389)
-    iid_honey = D.create_ingredient(conn, "Maple Syrup", 20, "ml", calories=52)
+    iid_oats  = D.create_ingredient(conn, "Rolled Oats", "g", calories=389)
+    iid_honey = D.create_ingredient(conn, "Maple Syrup", "ml", calories=52)
     D.add_component(conn, iid_oats,  3.0, recipe_id=rid)
     D.add_component(conn, iid_honey, 2.0, recipe_id=rid)
 
@@ -197,7 +213,7 @@ def test_batch_ingredient_modification():
     assert D.get_batch(conn, bid)["recipe_changes"] == 0
 
     # Adding an ingredient should trigger component copy
-    iid_nuts = D.create_ingredient(conn, "Walnuts", 30, "g", calories=196)
+    iid_nuts = D.create_ingredient(conn, "Walnuts", "g", calories=196)
     D.add_batch_ingredient(conn, bid, iid_nuts, 1.5)
     assert D.get_batch(conn, bid)["recipe_changes"] == 1
 
@@ -208,8 +224,8 @@ def test_batch_ingredient_modification():
 def test_copy_recipe_components_to_batch():
     conn = make_conn()
     rid = D.create_recipe(conn, "Smoothie")
-    iid1 = D.create_ingredient(conn, "Banana", 120, "g", calories=105)
-    iid2 = D.create_ingredient(conn, "Spinach", 30, "g", calories=7)
+    iid1 = D.create_ingredient(conn, "Banana", "g", calories=105)
+    iid2 = D.create_ingredient(conn, "Spinach", "g", calories=7)
     D.add_component(conn, iid1, 1.0, recipe_id=rid)
     D.add_component(conn, iid2, 1.0, recipe_id=rid)
     bid = D.create_batch(conn, rid, "2026-05-12")
@@ -224,7 +240,7 @@ def test_copy_recipe_components_to_batch():
 def test_create_batch_meal():
     conn = make_conn()
     rid = D.create_recipe(conn, "Bean Soup")
-    iid = D.create_ingredient(conn, "Black Beans", 100, "g", calories=132)
+    iid = D.create_ingredient(conn, "Black Beans", "g", calories=132)
     D.add_component(conn, iid, 4.0, recipe_id=rid)
     bid = D.create_batch(conn, rid, "2026-05-14")
     mid = D.create_meal(conn, "lunch", "2026-05-14",
@@ -235,7 +251,7 @@ def test_create_batch_meal():
 
 def test_create_ingredient_only_meal():
     conn = make_conn()
-    iid = D.create_ingredient(conn, "Apple", 182, "g", calories=95)
+    iid = D.create_ingredient(conn, "Apple", "g", calories=95)
     mid = D.create_meal(conn, "morning_snack", "2026-05-14")
     D.add_meal_ingredient(conn, mid, iid, 1.0)
     comps = D.get_components(conn, meal_id=mid)
@@ -286,10 +302,10 @@ def test_note_requires_parent():
 def _setup_nutrition_scenario(conn):
     """Build a small but complete scenario for nutrition tests."""
     rid = D.create_recipe(conn, "Veggie Bowl")
-    iid_rice = D.create_ingredient(conn, "Brown Rice", 100, "g",
+    iid_rice = D.create_ingredient(conn, "Brown Rice", "g",
                                     protein_grams=2.6, fat_grams=0.9,
                                     carb_grams=23, fiber_grams=1.8, calories=112)
-    iid_broc = D.create_ingredient(conn, "Broccoli", 100, "g",
+    iid_broc = D.create_ingredient(conn, "Broccoli", "g",
                                     protein_grams=2.8, fat_grams=0.4,
                                     carb_grams=7, fiber_grams=2.6, calories=34)
     D.add_component(conn, iid_rice, 2.0, recipe_id=rid)   # 200g rice
@@ -301,7 +317,7 @@ def _setup_nutrition_scenario(conn):
                          batch_id=bid, fraction_of_batch=0.5)
 
     # Standalone snack: just an apple
-    iid_apple = D.create_ingredient(conn, "Apple", 182, "g",
+    iid_apple = D.create_ingredient(conn, "Apple", "g",
                                      protein_grams=0.5, fat_grams=0.2,
                                      carb_grams=25, fiber_grams=4.4, calories=95)
     mid2 = D.create_meal(conn, "afternoon_snack", "2026-05-14")
@@ -349,7 +365,7 @@ def test_aggregate_date_validation():
 def test_search_recipes_and_ingredients():
     conn = make_conn()
     D.create_recipe(conn, "Chicken Stir Fry")
-    D.create_ingredient(conn, "Chicken Breast", 100, "g")
+    D.create_ingredient(conn, "Chicken Breast", "g")
     results = D.search_recipes_and_ingredients(conn, "chicken")
     assert len(results["recipes"]) == 1
     assert len(results["ingredients"]) == 1
