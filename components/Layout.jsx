@@ -12,15 +12,12 @@ export function Layout({ children }) {
         <NavLink to="/reports"   className={({isActive}) => 'nav-link' + (isActive ? ' active' : '')}>
           <span className="nav-icon">📈</span> Reports
         </NavLink>
-        <NavLink to="/meals/new" className={({isActive}) => 'nav-link' + (isActive ? ' active' : '')}>
-          <span className="nav-icon">🍽️</span> Log Meal
-        </NavLink>
         <div className="nav-section">Library</div>
         <NavLink to="/recipes"   className={({isActive}) => 'nav-link' + (isActive ? ' active' : '')}>
           <span className="nav-icon">📖</span> Recipes
         </NavLink>
-        <NavLink to="/batches"   className={({isActive}) => 'nav-link' + (isActive ? ' active' : '')}>
-          <span className="nav-icon">🥘</span> Batches
+        <NavLink to="/ingredients" className={({isActive}) => 'nav-link' + (isActive ? ' active' : '')}>
+          <span className="nav-icon">🥕</span> Ingredients
         </NavLink>
       </nav>
       <main className="main">

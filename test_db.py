@@ -229,10 +229,35 @@ def test_copy_recipe_components_to_batch():
     D.add_component(conn, iid1, 1.0, recipe_id=rid)
     D.add_component(conn, iid2, 1.0, recipe_id=rid)
     bid = D.create_batch(conn, rid, "2026-05-12")
-    n = D.copy_recipe_components_to_batch(conn, rid, bid)
-    assert n == 2
+    mapping = D.copy_recipe_components_to_batch(conn, rid, bid)
+    assert len(mapping) == 2
     comps = D.get_components(conn, batch_id=bid)
     assert len(comps) == 2
+
+
+def test_copy_recipe_components_to_batch_handles_duplicate_ingredient():
+    """
+    Regression test: an ingredient listed twice in a recipe (e.g. "water"
+    added as two separate components) must map to two distinct batch-level
+    component_ids, not collapse to the same one. Previously,
+    _resolve_batch_component_id re-derived the new id by matching on
+    ingredient_id alone, which always resolved to the same row for both
+    duplicates and broke deleting/editing the second occurrence.
+    """
+    conn = make_conn()
+    rid = D.create_recipe(conn, "Soup")
+    iid_water = D.create_ingredient(conn, "Water", "g", calories=0)
+    cid1 = D.add_component(conn, iid_water, 200.0, recipe_id=rid)
+    cid2 = D.add_component(conn, iid_water, 300.0, recipe_id=rid)
+    bid = D.create_batch(conn, rid, "2026-06-01")
+
+    mapping = D.copy_recipe_components_to_batch(conn, rid, bid)
+    assert len(mapping) == 2
+    assert mapping[cid1] != mapping[cid2]
+
+    comps = {c["component_id"]: c for c in D.get_components(conn, batch_id=bid)}
+    assert comps[mapping[cid1]]["quantity_multiple"] == 200.0
+    assert comps[mapping[cid2]]["quantity_multiple"] == 300.0
 
 
 # ── meal tests ──────────────────────────────────────────────────────────────
@@ -302,10 +327,10 @@ def test_note_requires_parent():
 def _setup_nutrition_scenario(conn):
     """Build a small but complete scenario for nutrition tests."""
     rid = D.create_recipe(conn, "Veggie Bowl")
-    iid_rice = D.create_ingredient(conn, "Brown Rice", "g",
+    iid_rice = D.create_ingredient(conn, "Brown Rice", "100g serving",
                                     protein_grams=2.6, fat_grams=0.9,
                                     carb_grams=23, fiber_grams=1.8, calories=112)
-    iid_broc = D.create_ingredient(conn, "Broccoli", "g",
+    iid_broc = D.create_ingredient(conn, "Broccoli", "100g serving",
                                     protein_grams=2.8, fat_grams=0.4,
                                     carb_grams=7, fiber_grams=2.6, calories=34)
     D.add_component(conn, iid_rice, 2.0, recipe_id=rid)   # 200g rice
@@ -317,7 +342,7 @@ def _setup_nutrition_scenario(conn):
                          batch_id=bid, fraction_of_batch=0.5)
 
     # Standalone snack: just an apple
-    iid_apple = D.create_ingredient(conn, "Apple", "g",
+    iid_apple = D.create_ingredient(conn, "Apple", "100g serving",
                                      protein_grams=0.5, fat_grams=0.2,
                                      carb_grams=25, fiber_grams=4.4, calories=95)
     mid2 = D.create_meal(conn, "afternoon_snack", "2026-05-14")
@@ -351,6 +376,21 @@ def test_aggregate_nutrition():
     report = D.get_aggregate_nutrition(conn, "2026-05-14", "2026-05-14")
     assert report["num_meals"] == 2
     assert report["num_days"] == 1
+    assert abs(report["totals"]["calories"] - 232.5) < 0.01
+    assert abs(report["daily_averages"]["calories"] - 232.5) < 0.01
+
+def test_aggregate_daily_average_only_counts_days_with_data():
+    """
+    Regression test: averaging over the full calendar span (e.g. 7 days)
+    when only 1 of those days actually has logged meals understates the
+    average by 7x. The average should divide by days *with data* only —
+    so with a single day of data, the average should equal the total.
+    """
+    conn = make_conn()
+    _setup_nutrition_scenario(conn)  # all data lands on 2026-05-14
+    report = D.get_aggregate_nutrition(conn, "2026-05-09", "2026-05-15")  # 7-day span
+    assert report["num_days"] == 7
+    assert report["num_days_with_data"] == 1
     assert abs(report["totals"]["calories"] - 232.5) < 0.01
     assert abs(report["daily_averages"]["calories"] - 232.5) < 0.01
 
@@ -396,6 +436,8 @@ if __name__ == "__main__":
         ("get latest batch",            test_get_latest_batch),
         ("batch ingredient modification", test_batch_ingredient_modification),
         ("copy recipe components to batch", test_copy_recipe_components_to_batch),
+        ("copy recipe components to batch handles duplicate ingredient",
+            test_copy_recipe_components_to_batch_handles_duplicate_ingredient),
         # meals
         ("create batch meal",           test_create_batch_meal),
         ("create ingredient-only meal", test_create_ingredient_only_meal),
@@ -407,6 +449,8 @@ if __name__ == "__main__":
         # nutrition
         ("daily nutrition",             test_daily_nutrition),
         ("aggregate nutrition",         test_aggregate_nutrition),
+        ("aggregate daily average only counts days with data",
+            test_aggregate_daily_average_only_counts_days_with_data),
         ("aggregate date validation",   test_aggregate_date_validation),
         ("search recipes and ingredients", test_search_recipes_and_ingredients),
     ]

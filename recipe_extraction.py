@@ -27,17 +27,20 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-import httpx
+from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
 
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 REQUEST_TIMEOUT = 20
 MAX_PAGE_TEXT_CHARS = 15000
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
+# Many recipe sites (AllRecipes, Food Network, Simply Recipes, The Kitchn,
+# ...) sit behind bot-detection (e.g. Cloudflare) that fingerprints the
+# TLS handshake / header ordering of the HTTP client itself — a plain
+# httpx/requests GET gets a 403 even with a perfectly normal Chrome
+# User-Agent header. curl_cffi's impersonate="chrome" mode reproduces a
+# real Chrome TLS fingerprint and gets through where httpx could not.
+IMPERSONATE = "chrome"
 
 
 class ExtractionError(Exception):
@@ -48,11 +51,28 @@ class FetchError(ExtractionError):
     """Raised when the source URL could not be fetched."""
 
 
+class InvalidUrlError(FetchError):
+    """Raised when the given URL is malformed — a client input error, not a fetch failure."""
+
+
 @dataclass
 class ExtractedIngredient:
-    name:     str
-    quantity: Optional[float] = None
-    unit:     Optional[str] = None
+    name:        str
+    quantity:    Optional[float] = None
+    unit:        Optional[str] = None
+    # A short, clean core ingredient name (e.g. "tomato", "red onion") with
+    # prep instructions, descriptors ("ripe", "finely chopped"), and "or"
+    # alternatives stripped out — used as the nutrition-database search
+    # query instead of `name`, since searching the full descriptive phrase
+    # tends to surface irrelevant branded products (e.g. "ripe tomato,
+    # chopped (optional)" matches "CHOPPED RIPE OLIVES" over any tomato).
+    search_name: Optional[str] = None
+    # The amount exactly as written in the source recipe (e.g. "1 (15-oz)
+    # can", "2 tbsp", "a pinch") — richer than `quantity`/`unit` alone,
+    # which are a simplified numeric approximation used for unit
+    # conversion. Stored verbatim on the component for display, since a
+    # user reading "44g" has no intuition for how many cups/cans that was.
+    original_quantity_text: Optional[str] = None
 
 
 @dataclass
@@ -74,15 +94,22 @@ class ExtractedRecipe:
 
 def extract_recipe_from_url(url: str, api_key: str) -> ExtractedRecipe:
     """Fetch a recipe web page and extract structured recipe data from it."""
+    if not re.match(r"^https?://", url.strip(), re.IGNORECASE):
+        raise InvalidUrlError(
+            "That doesn't look like a valid URL — it should start with http:// or https://."
+        )
+
     try:
-        resp = httpx.get(
+        resp = curl_requests.get(
             url,
-            headers={"User-Agent": USER_AGENT},
+            impersonate=IMPERSONATE,
             timeout=REQUEST_TIMEOUT,
-            follow_redirects=True,
+            allow_redirects=True,
         )
         resp.raise_for_status()
-    except httpx.HTTPError as e:
+    except curl_requests.exceptions.HTTPError as e:
+        raise FetchError(f"Could not fetch the URL: {e}") from e
+    except curl_requests.exceptions.RequestException as e:
         raise FetchError(f"Could not fetch the URL: {e}") from e
 
     page_text = _extract_page_text(resp.text)
@@ -146,11 +173,39 @@ _RECIPE_TOOL = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string"},
+                        "name": {
+                            "type": "string",
+                            "description": "The ingredient exactly as written in the recipe, "
+                                           "including any prep notes (e.g. \"ripe tomato, "
+                                           "chopped (optional)\").",
+                        },
                         "quantity": {"type": ["number", "null"]},
                         "unit": {"type": ["string", "null"]},
+                        "search_name": {
+                            "type": "string",
+                            "description": "A short (1-4 word) core ingredient name suitable "
+                                           "for searching a nutrition database — strip prep "
+                                           "instructions, descriptors (\"ripe\", \"fresh\", "
+                                           "\"finely chopped\"), and parenthetical asides, and "
+                                           "pick the first option from any \"X or Y\" "
+                                           "alternatives. E.g. \"ripe tomato, chopped "
+                                           "(optional)\" -> \"tomato\"; \"serrano (or "
+                                           "jalapeno) chilis, stems and seeds removed, minced\" "
+                                           "-> \"serrano pepper\"; \"minced red onion or thinly "
+                                           "sliced green onion\" -> \"red onion\".",
+                        },
+                        "original_quantity_text": {
+                            "type": ["string", "null"],
+                            "description": "The amount exactly as written in the recipe, "
+                                           "verbatim — e.g. \"1 (15-ounce/425g) can\", "
+                                           "\"2 tbsp\", \"a pinch\", \"to taste\". Keep any "
+                                           "parenthetical detail (can sizes, weights) that "
+                                           "`quantity`/`unit` alone would lose. Null only if "
+                                           "no amount is given at all.",
+                        },
                     },
-                    "required": ["name"],
+                    "required": ["name", "search_name"],
+                    "additionalProperties": False,
                 },
             },
             "steps": {
@@ -193,6 +248,8 @@ def _call_claude_extract(content_blocks: list[dict], api_key: str) -> ExtractedR
             name=i["name"],
             quantity=i.get("quantity"),
             unit=i.get("unit"),
+            search_name=i.get("search_name") or i["name"],
+            original_quantity_text=i.get("original_quantity_text"),
         )
         for i in data.get("ingredients", [])
     ]

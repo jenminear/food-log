@@ -37,7 +37,14 @@ def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
     Open a connection to the SQLite database with sensible defaults.
     Returns rows as sqlite3.Row objects (accessible by column name).
     """
-    conn = sqlite3.connect(db_path)
+    # check_same_thread=False: FastAPI resolves yield-based dependencies and
+    # the endpoint body as separate threadpool jobs, which can land on
+    # different worker threads even within one request. Each request still
+    # gets its own dedicated connection (never shared across concurrent
+    # requests), so this only relaxes the same-thread check for sequential
+    # use within a single request — it does not introduce real concurrent
+    # access to one connection.
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
@@ -125,6 +132,38 @@ def get_recipe(conn: sqlite3.Connection, recipe_id: int) -> sqlite3.Row:
     if row is None:
         raise NotFoundError(f"Recipe id={recipe_id} not found.")
     return row
+
+
+def recipe_has_batches(conn: sqlite3.Connection, recipe_id: int) -> bool:
+    """
+    True once a recipe has at least one batch ("cook"). A recipe with no
+    batches yet is still a draft and freely editable; once any batch
+    exists, the recipe is treated as locked/frozen so that batch history
+    stays meaningful (no separate "locked" flag is stored — this is
+    computed on demand).
+    """
+    row = conn.execute(
+        "SELECT 1 FROM batches WHERE recipe_id = ? LIMIT 1", (recipe_id,)
+    ).fetchone()
+    return row is not None
+
+
+def delete_recipe(conn: sqlite3.Connection, recipe_id: int) -> None:
+    """
+    Permanently delete a recipe (and its recipe-level components/notes via
+    cascade). Only allowed while the recipe has no batches yet — once a
+    batch exists, deleting the recipe would orphan its history, and the
+    `batches.recipe_id` foreign key (ON DELETE RESTRICT) would reject it
+    anyway; we check explicitly first to give a clearer error.
+    Raises NotFoundError if the recipe does not exist.
+    Raises ValidationError if the recipe has any batches.
+    """
+    get_recipe(conn, recipe_id)  # raises if missing
+    if recipe_has_batches(conn, recipe_id):
+        raise ValidationError(
+            "Cannot delete a recipe that has been cooked (it has batch history). "
+        )
+    conn.execute("DELETE FROM recipes WHERE recipe_id = ?", (recipe_id,))
 
 
 def search_recipes(conn: sqlite3.Connection, query: str) -> list[sqlite3.Row]:
@@ -249,6 +288,23 @@ def get_ingredient(conn: sqlite3.Connection, ingredient_id: int) -> sqlite3.Row:
     return row
 
 
+# Unit strings that mean "grams" — whenever portion_unit is one of these,
+# portion_grams MUST be 1 so that quantity_multiple directly represents
+# grams (the "Quantity" field's whole point). This used to be enforced only
+# in the frontend before calling /recipes/ingredients/resolve; any other
+# caller (a different client, a future endpoint, a test script) could
+# silently create an inconsistent ingredient — e.g. portion_unit="g" with
+# portion_grams=144 — which then silently corrupts every quantity_multiple
+# calculation for that ingredient. Enforced here so it can't drift again.
+GRAM_UNIT_ALIASES = {"g", "grm", "gram", "grams"}
+
+
+def _normalize_gram_portion(portion_unit: str, portion_grams: float) -> float:
+    if portion_unit.strip().lower() in GRAM_UNIT_ALIASES:
+        return 1.0
+    return portion_grams
+
+
 def create_ingredient(
     conn: sqlite3.Connection,
     ingredient_name: str,
@@ -286,6 +342,7 @@ def create_ingredient(
         raise ValidationError("portion_unit cannot be empty.")
     if portion_grams <= 0:
         raise ValidationError("portion_grams must be positive.")
+    portion_grams = _normalize_gram_portion(portion_unit, portion_grams)
 
     cur = conn.execute(
         """
@@ -372,10 +429,17 @@ def update_ingredient_nutrition(
         return
 
     row = conn.execute(
-        "SELECT 1 FROM ingredients WHERE ingredient_id = ?", (ingredient_id,)
+        "SELECT * FROM ingredients WHERE ingredient_id = ?", (ingredient_id,)
     ).fetchone()
     if row is None:
         raise NotFoundError(f"Ingredient id={ingredient_id} not found.")
+
+    # Enforce the gram-quantity invariant regardless of which field(s) were
+    # actually passed (e.g. changing only portion_unit to "g" must also
+    # reset portion_grams to 1, even if the caller didn't touch it).
+    effective_unit = updates.get("portion_unit", row["portion_unit"])
+    if effective_unit.strip().lower() in GRAM_UNIT_ALIASES:
+        updates["portion_grams"] = 1.0
 
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     conn.execute(
@@ -399,6 +463,30 @@ def search_ingredients(conn: sqlite3.Connection, query: str) -> list[sqlite3.Row
     return conn.execute(sql, params).fetchall()
 
 
+def ingredient_in_use(conn: sqlite3.Connection, ingredient_id: int) -> bool:
+    """True if any recipe/batch/meal component references this ingredient."""
+    row = conn.execute(
+        "SELECT 1 FROM components WHERE ingredient_id = ? LIMIT 1", (ingredient_id,)
+    ).fetchone()
+    return row is not None
+
+
+def delete_ingredient(conn: sqlite3.Connection, ingredient_id: int) -> None:
+    """
+    Delete an ingredient. Only allowed if it isn't referenced by any
+    recipe/batch/meal component — deleting one that's in use would corrupt
+    those components' nutrition data.
+    Raises NotFoundError if it does not exist.
+    Raises ValidationError if it's in use anywhere.
+    """
+    get_ingredient(conn, ingredient_id)  # raises if missing
+    if ingredient_in_use(conn, ingredient_id):
+        raise ValidationError(
+            "Cannot delete an ingredient that's used in a recipe, batch, or meal."
+        )
+    conn.execute("DELETE FROM ingredients WHERE ingredient_id = ?", (ingredient_id,))
+
+
 # ===========================================================================
 # COMPONENTS
 # ===========================================================================
@@ -411,11 +499,17 @@ def add_component(
     recipe_id: Optional[int] = None,
     batch_id: Optional[int] = None,
     meal_id: Optional[int] = None,
+    original_quantity_text: Optional[str] = None,
 ) -> int:
     """
     Link an ingredient to exactly one of: recipe, batch, or meal.
     Returns the new component_id.
     Raises ValidationError if not exactly one parent is supplied.
+
+    `original_quantity_text` preserves the amount as originally written in
+    a source recipe (e.g. "2 tbsp", "1 (15-oz) can") alongside the computed
+    `quantity_multiple` (which is always in terms of the ingredient's
+    portion_unit) — purely for display, not used in any calculation.
     """
     parents = [recipe_id, batch_id, meal_id]
     if sum(p is not None for p in parents) != 1:
@@ -428,10 +522,10 @@ def add_component(
     cur = conn.execute(
         """
         INSERT INTO components
-            (recipe_id, batch_id, meal_id, ingredient_id, quantity_multiple)
-        VALUES (?, ?, ?, ?, ?)
+            (recipe_id, batch_id, meal_id, ingredient_id, quantity_multiple, original_quantity_text)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (recipe_id, batch_id, meal_id, ingredient_id, quantity_multiple),
+        (recipe_id, batch_id, meal_id, ingredient_id, quantity_multiple, original_quantity_text),
     )
     return cur.lastrowid
 
@@ -482,10 +576,17 @@ def remove_component(conn: sqlite3.Connection, component_id: int) -> None:
 
 
 def update_component_quantity(
-    conn: sqlite3.Connection, component_id: int, quantity_multiple: float
+    conn: sqlite3.Connection,
+    component_id: int,
+    quantity_multiple: float,
+    *,
+    original_quantity_text: Optional[str] = None,
+    update_original_quantity_text: bool = False,
 ) -> None:
     """
-    Change the quantity_multiple for an existing component.
+    Change the quantity_multiple for an existing component, and optionally
+    its original_quantity_text (only written when `update_original_quantity_text`
+    is True, so callers that don't touch that field don't accidentally clear it).
     Raises NotFoundError if it does not exist.
     Raises ValidationError if quantity_multiple <= 0.
     """
@@ -496,20 +597,34 @@ def update_component_quantity(
     ).fetchone()
     if row is None:
         raise NotFoundError(f"Component id={component_id} not found.")
-    conn.execute(
-        "UPDATE components SET quantity_multiple = ? WHERE component_id = ?",
-        (quantity_multiple, component_id),
-    )
+    if update_original_quantity_text:
+        conn.execute(
+            "UPDATE components SET quantity_multiple = ?, original_quantity_text = ? "
+            "WHERE component_id = ?",
+            (quantity_multiple, original_quantity_text, component_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE components SET quantity_multiple = ? WHERE component_id = ?",
+            (quantity_multiple, component_id),
+        )
 
 
 def copy_recipe_components_to_batch(
     conn: sqlite3.Connection, recipe_id: int, batch_id: int
-) -> int:
+) -> dict[int, int]:
     """
     Copy all recipe-level components to the batch, associating them with
     batch_id instead of recipe_id.  Called on the first modification to a
     batch so subsequent edits affect only the batch copy.
-    Returns the number of components copied.
+
+    Returns a {old_recipe_component_id: new_batch_component_id} mapping —
+    an explicit 1:1 mapping is required (rather than re-deriving the new id
+    by ingredient_id) because the same ingredient can appear more than once
+    in a recipe (e.g. "water" listed twice with different quantities);
+    matching by ingredient_id alone would be ambiguous and could resolve
+    edits/deletes to the wrong copy.
+
     Raises NotFoundError if no components exist for the recipe.
     """
     recipe_components = get_components(conn, recipe_id=recipe_id)
@@ -518,14 +633,17 @@ def copy_recipe_components_to_batch(
             f"No components found for recipe_id={recipe_id}. "
             "Cannot copy to batch."
         )
+    mapping: dict[int, int] = {}
     for comp in recipe_components:
-        add_component(
+        new_id = add_component(
             conn,
             ingredient_id=comp["ingredient_id"],
             quantity_multiple=comp["quantity_multiple"],
             batch_id=batch_id,
+            original_quantity_text=comp["original_quantity_text"],
         )
-    return len(recipe_components)
+        mapping[comp["component_id"]] = new_id
+    return mapping
 
 
 # ===========================================================================
@@ -594,6 +712,62 @@ def get_latest_batch_for_recipe(
     ).fetchone()
 
 
+def list_batches_for_recipe(
+    conn: sqlite3.Connection, recipe_id: int
+) -> list[sqlite3.Row]:
+    """Batch summaries (batch_id, date) for a recipe, newest first."""
+    return conn.execute(
+        """
+        SELECT batch_id, date FROM batches
+        WHERE  recipe_id = ?
+        ORDER  BY date DESC, batch_id DESC
+        """,
+        (recipe_id,),
+    ).fetchall()
+
+
+def is_latest_batch(conn: sqlite3.Connection, batch_id: int) -> bool:
+    """
+    True if `batch_id` is the most recently created batch for its recipe.
+    Only the latest batch for a recipe is editable — every earlier batch
+    is a frozen historical record (no stored flag; computed on demand).
+    """
+    batch = get_batch(conn, batch_id)
+    latest = get_latest_batch_for_recipe(conn, batch["recipe_id"])
+    return latest is not None and latest["batch_id"] == batch_id
+
+
+def batch_has_meals(conn: sqlite3.Connection, batch_id: int) -> bool:
+    """True if any meal has been logged against this batch."""
+    row = conn.execute(
+        "SELECT 1 FROM meals WHERE batch_id = ? LIMIT 1", (batch_id,)
+    ).fetchone()
+    return row is not None
+
+
+def delete_batch(conn: sqlite3.Connection, batch_id: int) -> None:
+    """
+    Delete a batch (and its batch-level components, if any were
+    materialized). Only allowed for the most recent batch of its recipe,
+    and only if no meals have been logged against it — deleting an older
+    or already-eaten-from batch would corrupt history / orphan meals.
+    Raises NotFoundError if the batch does not exist.
+    Raises ValidationError if it's not the latest batch, or has meals.
+    """
+    get_batch(conn, batch_id)  # raises if missing
+    if not is_latest_batch(conn, batch_id):
+        raise ValidationError(
+            "Only the most recent batch for a recipe can be deleted."
+        )
+    if batch_has_meals(conn, batch_id):
+        raise ValidationError(
+            "Cannot delete a batch that has meals logged against it."
+        )
+    conn.execute("DELETE FROM components WHERE batch_id = ?", (batch_id,))
+    conn.execute("DELETE FROM notes WHERE batch_id = ?", (batch_id,))
+    conn.execute("DELETE FROM batches WHERE batch_id = ?", (batch_id,))
+
+
 def _ensure_batch_components_copied(
     conn: sqlite3.Connection, batch_id: int
 ) -> None:
@@ -616,6 +790,8 @@ def add_batch_ingredient(
     batch_id: int,
     ingredient_id: int,
     quantity_multiple: float,
+    *,
+    original_quantity_text: Optional[str] = None,
 ) -> int:
     """
     Add a new ingredient to a batch (triggers component copy if first change).
@@ -623,7 +799,8 @@ def add_batch_ingredient(
     """
     _ensure_batch_components_copied(conn, batch_id)
     return add_component(
-        conn, ingredient_id, quantity_multiple, batch_id=batch_id
+        conn, ingredient_id, quantity_multiple, batch_id=batch_id,
+        original_quantity_text=original_quantity_text,
     )
 
 
@@ -651,6 +828,9 @@ def update_batch_ingredient_quantity(
     batch_id: int,
     component_id: int,
     quantity_multiple: float,
+    *,
+    original_quantity_text: Optional[str] = None,
+    update_original_quantity_text: bool = False,
 ) -> None:
     """
     Change the quantity of an ingredient in a batch (triggers copy if first change).
@@ -665,7 +845,11 @@ def update_batch_ingredient_quantity(
         raise NotFoundError(
             f"Component id={component_id} not found on batch id={batch_id}."
         )
-    update_component_quantity(conn, component_id, quantity_multiple)
+    update_component_quantity(
+        conn, component_id, quantity_multiple,
+        original_quantity_text=original_quantity_text,
+        update_original_quantity_text=update_original_quantity_text,
+    )
 
 
 # ===========================================================================
@@ -726,6 +910,18 @@ def create_meal(
         (meal_type, meal_date, timestamp, fraction_of_batch, batch_id),
     )
     return cur.lastrowid
+
+
+def delete_meal(conn: sqlite3.Connection, meal_id: int) -> None:
+    """
+    Delete a meal record. Standalone-meal components are deleted explicitly
+    first (components.meal_id has no real cascading FK — it's only checked
+    by a BEFORE INSERT trigger, not enforced on delete); notes cascade via
+    their own FK. Raises NotFoundError if the meal does not exist.
+    """
+    get_meal(conn, meal_id)  # raises if missing
+    conn.execute("DELETE FROM components WHERE meal_id = ?", (meal_id,))
+    conn.execute("DELETE FROM meals WHERE meal_id = ?", (meal_id,))
 
 
 def get_meal(conn: sqlite3.Connection, meal_id: int) -> sqlite3.Row:
@@ -896,6 +1092,28 @@ def _component_nutrition(components: list[sqlite3.Row]) -> dict:
     return {k: (totals[k] if has_data[k] else None) for k in totals}
 
 
+def _format_component_with_nutrition(comp: sqlite3.Row, frac: float) -> dict:
+    """
+    A single component row, with its nutrient values scaled to its actual
+    contribution to the meal (quantity_multiple * portion_grams/100 * frac)
+    rather than left as per-100g — used for the per-ingredient breakdown
+    table on the Today page, where each row's values should sum to the
+    meal's total.
+    """
+    portion_scale = comp["quantity_multiple"] * (comp["portion_grams"] / 100.0) * frac
+    nutrient_keys = ("protein_grams", "fat_grams", "carb_grams", "fiber_grams", "calories")
+    return {
+        "ingredient_name":   comp["ingredient_name"],
+        "quantity_multiple": comp["quantity_multiple"] * frac,
+        "portion_unit":      comp["portion_unit"],
+        "portion_grams":     comp["portion_grams"],
+        **{
+            k: (comp[k] * portion_scale if comp[k] is not None else None)
+            for k in nutrient_keys
+        },
+    }
+
+
 def get_daily_nutrition(
     conn: sqlite3.Connection, query_date: Optional[str] = None
 ) -> dict:
@@ -956,15 +1174,10 @@ def get_daily_nutrition(
             else:
                 components = get_components(conn, recipe_id=batch["recipe_id"])
             frac = meal["fraction_of_batch"] or 1.0
-            # Build a scaled view for display
-            comp_list = []
-            for c in components:
-                comp_list.append({
-                    "ingredient_name":  c["ingredient_name"],
-                    "quantity_multiple": c["quantity_multiple"] * frac,
-                    "portion_unit":     c["portion_unit"],
-                    "portion_grams":    c["portion_grams"],
-                })
+            # Build a scaled view for display, including each component's own
+            # contribution to the meal's nutrition (for the per-ingredient
+            # breakdown table) — not just the per-100g values on `c`.
+            comp_list = [_format_component_with_nutrition(c, frac) for c in components]
             # Scale nutrition by fraction
             raw_nutrition = _component_nutrition(components)
             nutrition = {
@@ -975,14 +1188,7 @@ def get_daily_nutrition(
         else:
             # Standalone ingredient meal
             components = get_components(conn, meal_id=meal["meal_id"])
-            comp_list = []
-            for c in components:
-                comp_list.append({
-                    "ingredient_name":  c["ingredient_name"],
-                    "quantity_multiple": c["quantity_multiple"],
-                    "portion_unit":     c["portion_unit"],
-                    "portion_grams":    c["portion_grams"],
-                })
+            comp_list = [_format_component_with_nutrition(c, 1.0) for c in components]
             nutrition = _component_nutrition(components)
             source = "ingredients"
 
@@ -997,7 +1203,9 @@ def get_daily_nutrition(
             "meal_type":        meal["meal_type"],
             "timestamp":        meal["timestamp"],
             "source":           source,
+            "recipe_id":        meal["recipe_id"],
             "recipe_name":      meal["recipe_name"],
+            "batch_id":         meal["batch_id"],
             "fraction_of_batch": meal["fraction_of_batch"],
             "components":       comp_list,
             "nutrition":        nutrition,
@@ -1046,7 +1254,7 @@ def get_aggregate_nutrition(
     # Fetch all meals in the range
     meals = conn.execute(
         """
-        SELECT m.meal_id, m.batch_id, m.fraction_of_batch
+        SELECT m.meal_id, m.date, m.batch_id, m.fraction_of_batch
         FROM   meals m
         WHERE  m.date BETWEEN ? AND ?
         """,
@@ -1055,8 +1263,10 @@ def get_aggregate_nutrition(
 
     totals = {k: 0.0 for k in ("protein_grams", "fat_grams", "carb_grams", "fiber_grams", "calories")}
     has_data = {k: False for k in totals}
+    days_with_data = set()
 
     for meal in meals:
+        days_with_data.add(meal["date"])
         if meal["batch_id"] is not None:
             batch = get_batch(conn, meal["batch_id"])
             if batch["recipe_changes"] == 1:
@@ -1079,22 +1289,28 @@ def get_aggregate_nutrition(
 
     final_totals = {k: (totals[k] if has_data[k] else None) for k in totals}
 
-    # Calendar days in range
+    # Calendar days in range (for display/context — e.g. "Last 7 Days")
     from datetime import date as _d
     start = _d.fromisoformat(start_date)
     end   = _d.fromisoformat(end_date)
     num_days = (end - start).days + 1
 
+    # Averages are per day *that actually has logged data*, not per calendar
+    # day in the range — otherwise one logged day in a 7-day range would
+    # make the average look 7x lower than reality.
+    num_days_with_data = len(days_with_data) or 1
+
     daily_averages = {
-        k: (final_totals[k] / num_days if final_totals[k] is not None else None)
+        k: (final_totals[k] / num_days_with_data if final_totals[k] is not None else None)
         for k in final_totals
     }
 
     return {
-        "start_date":     start_date,
-        "end_date":       end_date,
-        "num_days":       num_days,
-        "num_meals":      len(meals),
-        "totals":         final_totals,
-        "daily_averages": daily_averages,
+        "start_date":         start_date,
+        "end_date":           end_date,
+        "num_days":           num_days,
+        "num_days_with_data": len(days_with_data),
+        "num_meals":          len(meals),
+        "totals":             final_totals,
+        "daily_averages":     daily_averages,
     }

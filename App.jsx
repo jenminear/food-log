@@ -4,8 +4,7 @@ import Today        from './pages/Today'
 import Reports      from './pages/Reports'
 import Recipes      from './pages/Recipes'
 import RecipeDetail from './pages/RecipeDetail'
-import Batches      from './pages/Batches'
-import LogMeal      from './pages/Meals'
+import Ingredients  from './pages/Ingredients'
 
 export default function App() {
   return (
@@ -15,9 +14,7 @@ export default function App() {
         <Route path="/reports"        element={<Reports />} />
         <Route path="/recipes"        element={<Recipes />} />
         <Route path="/recipes/:id"    element={<RecipeDetail />} />
-        <Route path="/batches"        element={<Batches />} />
-        <Route path="/batches/:id"    element={<Batches />} />
-        <Route path="/meals/new"      element={<LogMeal />} />
+        <Route path="/ingredients"    element={<Ingredients />} />
       </Routes>
     </Layout>
   )

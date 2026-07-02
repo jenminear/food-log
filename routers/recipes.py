@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 
 import app as App
 import db
+import ingredient_weight_estimator as WE
 import nutrition_lookup as NL
 import recipe_extraction as RE
 from dependencies import (
@@ -32,13 +33,16 @@ from dependencies import (
     get_anthropic_api_key, get_usda_api_key, require_session, save_image,
 )
 from models import (
+    BatchSummary,
     ComponentAddRequest, ComponentSummary, ComponentUpdateRequest,
     ExtractedIngredient, ExtractedRecipeResponse,
-    IngredientAddRequest, IngredientConfirmRequest, IngredientDetailResponse,
+    IngredientAddRequest, IngredientConfirmRequest, IngredientCreateRequest,
+    IngredientDetailResponse,
     IngredientResolveRequest, IngredientResult, IngredientSummary,
     IngredientUpdateRequest,
     MessageResponse, NoteRequest, NoteResponse,
     RecipeRequest, RecipeResponse, RecipeSummary, RecipeUrlRequest,
+    WeightEstimateRequest, WeightEstimateResponse,
 )
 
 router = APIRouter(prefix="/recipes", tags=["Recipes"])
@@ -56,6 +60,7 @@ def _row_to_component_summary(row) -> ComponentSummary:
         quantity_multiple = row["quantity_multiple"],
         portion_unit      = row["portion_unit"],
         portion_grams     = row["portion_grams"],
+        original_quantity_text = row["original_quantity_text"],
         calories          = row["calories"],
         protein_grams     = row["protein_grams"],
         fat_grams         = row["fat_grams"],
@@ -77,10 +82,17 @@ def _row_to_ingredient_detail(row) -> IngredientDetailResponse:
         fiber_grams            = row["fiber_grams"],
         source_food_name       = row["source_food_name"],
         nutrition_info_source  = row["nutrition_info_source"],
+        data_quality_warning   = NL.compute_data_quality_warning(
+            calories=row["calories"], protein_grams=row["protein_grams"],
+            fat_grams=row["fat_grams"], carb_grams=row["carb_grams"],
+            portion_unit=row["portion_unit"],
+        ),
     )
 
 
-def _row_to_recipe_response(row, components: list[ComponentSummary] | None = None) -> RecipeResponse:
+def _row_to_recipe_response(
+    conn, row, components: list[ComponentSummary] | None = None
+) -> RecipeResponse:
     return RecipeResponse(
         recipe_id        = row["recipe_id"],
         recipe_name      = row["recipe_name"],
@@ -93,6 +105,7 @@ def _row_to_recipe_response(row, components: list[ComponentSummary] | None = Non
         vegetarian       = bool(row["vegetarian"]),
         source           = row["source"],
         picture_path     = row["picture_path"],
+        is_locked        = db.recipe_has_batches(conn, row["recipe_id"]),
         components       = components or [],
     )
 
@@ -289,6 +302,10 @@ def search_ingredient(
         description="Skip the local-database lookup and search external APIs directly "
                     "(used when the user rejects the local match via 'None of these')",
     ),
+    limit: int = Query(
+        5, ge=1, le=25,
+        description="Max number of external candidates to return (used by 'more options')",
+    ),
 ):
     """
     Search for an ingredient in the database or via external APIs.
@@ -316,12 +333,17 @@ def search_ingredient(
                 "fat_grams": existing["fat_grams"],
                 "carb_grams": existing["carb_grams"],
                 "fiber_grams": existing["fiber_grams"],
+                "data_quality_warning": NL.compute_data_quality_warning(
+                    calories=existing["calories"], protein_grams=existing["protein_grams"],
+                    fat_grams=existing["fat_grams"], carb_grams=existing["carb_grams"],
+                    portion_unit=existing["portion_unit"],
+                ),
             },
             "candidates": None,
         }
 
     # Not in database - search external APIs
-    candidates = NL.lookup(q, usda_api_key=get_usda_api_key())
+    candidates = NL.lookup(q, usda_api_key=get_usda_api_key(), max_candidates=limit)
 
     if not candidates:
         return {
@@ -352,6 +374,7 @@ def search_ingredient(
                     f"USDA: {c.ingredient_name}" if c.source == "usda"
                     else f"{c.source}: {c.ingredient_name}"
                 ),
+                "data_quality_warning": c.data_quality_warning(),
                 "summary": c.summary(),
             }
             for c in candidates
@@ -385,9 +408,75 @@ def local_search_ingredients(
             fat_grams       = r["fat_grams"],
             carb_grams      = r["carb_grams"],
             fiber_grams     = r["fiber_grams"],
+            data_quality_warning = NL.compute_data_quality_warning(
+                calories=r["calories"], protein_grams=r["protein_grams"],
+                fat_grams=r["fat_grams"], carb_grams=r["carb_grams"],
+                portion_unit=r["portion_unit"],
+            ),
         )
         for r in rows[:8]
     ]
+
+
+# ---------------------------------------------------------------------------
+# Browse / create standalone ingredients (the Ingredients tab)
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/ingredients",
+    response_model=list[IngredientSummary],
+    summary="Search the ingredients table (for the Ingredients tab — not capped like local-search)",
+)
+def browse_ingredients(
+    conn: DbConn,
+    _: Auth,
+    q: str = Query(..., min_length=1, description="Ingredient name to search"),
+):
+    rows = db.search_ingredients(conn, q)
+    return [
+        IngredientSummary(
+            ingredient_id   = r["ingredient_id"],
+            ingredient_name = r["ingredient_name"],
+            portion_unit    = r["portion_unit"],
+            portion_grams   = r["portion_grams"],
+            calories        = r["calories"],
+            protein_grams   = r["protein_grams"],
+            fat_grams       = r["fat_grams"],
+            carb_grams      = r["carb_grams"],
+            fiber_grams     = r["fiber_grams"],
+            data_quality_warning = NL.compute_data_quality_warning(
+                calories=r["calories"], protein_grams=r["protein_grams"],
+                fat_grams=r["fat_grams"], carb_grams=r["carb_grams"],
+                portion_unit=r["portion_unit"],
+            ),
+        )
+        for r in rows[:50]
+    ]
+
+
+@router.post(
+    "/ingredients",
+    response_model=IngredientDetailResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a single standalone ingredient directly (no USDA/OFF lookup)",
+)
+def create_ingredient(req: IngredientCreateRequest, conn: DbConn, _: Auth):
+    try:
+        ingredient_id = db.create_ingredient(
+            conn, req.ingredient_name, req.portion_unit,
+            portion_grams=req.portion_grams,
+            calories=req.calories,
+            protein_grams=req.protein_grams,
+            fat_grams=req.fat_grams,
+            carb_grams=req.carb_grams,
+            fiber_grams=req.fiber_grams,
+            nutrition_info_source=req.nutrition_info_source,
+        )
+        conn.commit()
+        row = db.get_ingredient(conn, ingredient_id)
+    except db.ValidationError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    return _row_to_ingredient_detail(row)
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +490,10 @@ def local_search_ingredients(
 )
 def resolve_ingredient(req: IngredientResolveRequest, conn: DbConn, _: Auth):
     data = req.candidate if req.candidate is not None else req.manual_data
-    kwargs = {k: v for k, v in data.items() if k not in ("ingredient_name", "summary", "ingredient_id", "all_portions")}
+    kwargs = {
+        k: v for k, v in data.items()
+        if k not in ("ingredient_name", "summary", "ingredient_id", "all_portions", "data_quality_warning")
+    }
     if req.candidate is not None:
         # The candidate's own ingredient_name is the USDA/OFF source food
         # name (e.g. "Apple, raw"), distinct from req.ingredient_name (the
@@ -459,6 +551,22 @@ def update_ingredient(ingredient_id: int, req: IngredientUpdateRequest, conn: Db
     return _row_to_ingredient_detail(row)
 
 
+@router.delete(
+    "/ingredients/{ingredient_id}",
+    response_model=MessageResponse,
+    summary="Delete an ingredient (only if not used in any recipe, batch, or meal)",
+)
+def delete_ingredient(ingredient_id: int, conn: DbConn, _: Auth):
+    try:
+        db.delete_ingredient(conn, ingredient_id)
+        conn.commit()
+    except db.NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
+    except db.ValidationError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(e))
+    return MessageResponse(message=f"Ingredient {ingredient_id} deleted.")
+
+
 # ---------------------------------------------------------------------------
 # AI recipe extraction (from URL or photo)
 # ---------------------------------------------------------------------------
@@ -496,7 +604,10 @@ def _extracted_to_response(extracted: RE.ExtractedRecipe) -> ExtractedRecipeResp
         vegetarian       = extracted.vegetarian,
         vegan            = extracted.vegan,
         ingredients      = [
-            ExtractedIngredient(name=i.name, quantity=i.quantity, unit=i.unit)
+            ExtractedIngredient(
+                name=i.name, quantity=i.quantity, unit=i.unit, search_name=i.search_name,
+                original_quantity_text=i.original_quantity_text,
+            )
             for i in extracted.ingredients
         ],
         steps            = extracted.steps,
@@ -512,6 +623,8 @@ def extract_recipe_from_url(req: RecipeUrlRequest, _: Auth):
     api_key = _require_anthropic_key()
     try:
         extracted = RE.extract_recipe_from_url(req.url, api_key)
+    except RE.InvalidUrlError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except RE.FetchError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(e))
     except RE.ExtractionError as e:
@@ -549,6 +662,28 @@ async def extract_recipe_from_image(_: Auth, file: UploadFile = File(...)):
     return _extracted_to_response(extracted)
 
 
+@router.post(
+    "/ingredients/estimate-weight",
+    response_model=WeightEstimateResponse,
+    summary="AI-estimate an ingredient quantity's weight in grams (last resort)",
+)
+def estimate_ingredient_weight(req: WeightEstimateRequest, _: Auth):
+    """
+    Used only when the frontend's table-based and density-based unit
+    conversions both fail (e.g. count-based amounts like "2 avocados", or
+    vague phrases). Returns `found: false` if no reasonable estimate could
+    be made — the caller should fall back to manual entry in that case.
+    """
+    api_key = _require_anthropic_key()
+    try:
+        estimate = WE.estimate_grams(req.ingredient_name, req.quantity, req.unit, api_key)
+    except WE.EstimationError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    if estimate is None:
+        return WeightEstimateResponse(found=False)
+    return WeightEstimateResponse(found=True, grams=estimate.grams, confidence=estimate.confidence)
+
+
 # ---------------------------------------------------------------------------
 # Get single recipe
 # ---------------------------------------------------------------------------
@@ -564,7 +699,7 @@ def get_recipe(recipe_id: int, conn: DbConn, _: Auth):
     except db.NotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
     components = [_row_to_component_summary(c) for c in db.get_components(conn, recipe_id=recipe_id)]
-    return _row_to_recipe_response(row, components)
+    return _row_to_recipe_response(conn, row, components)
 
 
 # ---------------------------------------------------------------------------
@@ -594,12 +729,64 @@ def update_recipe(recipe_id: int, req: RecipeRequest, conn: DbConn, _: Auth):
         row = db.get_recipe(conn, recipe_id)
     except db.NotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
-    return _row_to_recipe_response(row)
+    return _row_to_recipe_response(conn, row)
+
+
+# ---------------------------------------------------------------------------
+# Delete a recipe (only while it has no batches — i.e. still a draft)
+# ---------------------------------------------------------------------------
+
+@router.delete(
+    "/{recipe_id}",
+    response_model=MessageResponse,
+    summary="Delete a recipe (only allowed before it has any batches)",
+)
+def delete_recipe(recipe_id: int, conn: DbConn, _: Auth):
+    try:
+        db.delete_recipe(conn, recipe_id)
+        conn.commit()
+    except db.NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
+    except db.ValidationError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(e))
+    return MessageResponse(message=f"Recipe {recipe_id} deleted.")
+
+
+# ---------------------------------------------------------------------------
+# Batch history for a recipe
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{recipe_id}/batches",
+    response_model=list[BatchSummary],
+    summary="List a recipe's batches (newest first)",
+)
+def list_recipe_batches(recipe_id: int, conn: DbConn, _: Auth):
+    try:
+        db.get_recipe(conn, recipe_id)  # 404 if missing
+    except db.NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
+    rows = db.list_batches_for_recipe(conn, recipe_id)
+    return [BatchSummary(batch_id=r["batch_id"], date=r["date"]) for r in rows]
 
 
 # ---------------------------------------------------------------------------
 # Recipe components (ingredients within a recipe)
 # ---------------------------------------------------------------------------
+
+def _require_unlocked_recipe(conn, recipe_id: int) -> None:
+    """
+    Raise 409 if the recipe already has a batch — once cooked, the recipe's
+    own ingredient list is frozen; further quantity changes belong to a
+    batch (via /batches/{batch_id}/components), not the recipe itself.
+    """
+    if db.recipe_has_batches(conn, recipe_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="This recipe has been cooked and its ingredients are frozen. "
+                   "Use 'Cook This' and edit the batch instead.",
+        )
+
 
 @router.post(
     "/{recipe_id}/components",
@@ -608,9 +795,11 @@ def update_recipe(recipe_id: int, req: RecipeRequest, conn: DbConn, _: Auth):
     summary="Add an ingredient (component) to a recipe",
 )
 def add_recipe_component(recipe_id: int, req: ComponentAddRequest, conn: DbConn, _: Auth):
+    _require_unlocked_recipe(conn, recipe_id)
     try:
         component_id = db.add_component(
-            conn, req.ingredient_id, req.quantity_multiple, recipe_id=recipe_id
+            conn, req.ingredient_id, req.quantity_multiple, recipe_id=recipe_id,
+            original_quantity_text=req.original_quantity_text,
         )
         conn.commit()
     except (db.NotFoundError, db.ValidationError) as e:
@@ -629,8 +818,13 @@ def add_recipe_component(recipe_id: int, req: ComponentAddRequest, conn: DbConn,
 def update_recipe_component(
     recipe_id: int, component_id: int, req: ComponentUpdateRequest, conn: DbConn, _: Auth,
 ):
+    _require_unlocked_recipe(conn, recipe_id)
     try:
-        db.update_component_quantity(conn, component_id, req.quantity_multiple)
+        db.update_component_quantity(
+            conn, component_id, req.quantity_multiple,
+            original_quantity_text=req.original_quantity_text,
+            update_original_quantity_text=True,
+        )
         conn.commit()
     except db.NotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -647,6 +841,7 @@ def update_recipe_component(
     summary="Remove an ingredient (component) from a recipe",
 )
 def delete_recipe_component(recipe_id: int, component_id: int, conn: DbConn, _: Auth):
+    _require_unlocked_recipe(conn, recipe_id)
     try:
         db.remove_component(conn, component_id)
         conn.commit()

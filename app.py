@@ -384,17 +384,53 @@ def create_batch_from_recipe_id(
     *,
     batch_date: Optional[str] = None,
     picture_path: Optional[str] = None,
+    source_batch_id: Optional[int] = None,
 ) -> dict:
     """
     Create a batch directly from a known recipe_id (e.g. after resolving
     ambiguity from create_batch()).
+
+    By default, the new batch lazily mirrors the recipe's own ingredient
+    list (the usual copy-on-write path — nothing is duplicated until the
+    batch is first edited).
+
+    If `source_batch_id` is given, the new batch instead mirrors THAT
+    batch's current ingredient list AND notes (e.g. "Cook This" from a
+    past batch should reproduce what was actually cooked then, including
+    any substitutions — not silently revert to the original recipe). This
+    makes the new batch's ingredients diverge from a plain recipe mirror,
+    so they're materialized into batch-level components immediately
+    (recipe_changes=1) rather than left lazy.
     """
     if batch_date is None:
         batch_date = _today()
     recipe = db.get_recipe(conn, recipe_id)
     batch_id = db.create_batch(conn, recipe_id, batch_date, picture_path=picture_path)
+
+    if source_batch_id is not None:
+        source_batch = db.get_batch(conn, source_batch_id)
+        source_components = (
+            db.get_components(conn, batch_id=source_batch_id)
+            if source_batch["recipe_changes"] == 1
+            else db.get_components(conn, recipe_id=recipe_id)
+        )
+        for comp in source_components:
+            db.add_component(
+                conn,
+                ingredient_id=comp["ingredient_id"],
+                quantity_multiple=comp["quantity_multiple"],
+                batch_id=batch_id,
+                original_quantity_text=comp["original_quantity_text"],
+            )
+        conn.execute("UPDATE batches SET recipe_changes = 1 WHERE batch_id = ?", (batch_id,))
+        components = db.get_components(conn, batch_id=batch_id)
+
+        for note in db.get_notes(conn, batch_id=source_batch_id):
+            db.add_note(conn, note["note_txt"], batch_id=batch_id, note_date=note["note_date"])
+    else:
+        components = db.get_components(conn, recipe_id=recipe_id)
+
     conn.commit()
-    components = db.get_components(conn, recipe_id=recipe_id)
     return {
         "status":      "created",
         "batch_id":    batch_id,
@@ -418,40 +454,27 @@ def _resolve_batch_component_id(
     When a batch has not yet been modified, its components live at the recipe
     level. If the caller passes a recipe-level component_id, this function
     triggers the copy-on-first-change and returns the matching batch-level
-    component_id (matched by ingredient_id).
+    component_id, via the explicit old-id -> new-id mapping returned by
+    copy_recipe_components_to_batch (NOT by re-matching on ingredient_id,
+    which is ambiguous when the same ingredient appears more than once in
+    the recipe, e.g. "water" listed twice).
     """
     batch = db.get_batch(conn, batch_id)
     if batch["recipe_changes"] == 1:
         # Already copied — component_id should already be batch-level
         return component_id
 
-    # Find the ingredient_id of the recipe-level component
-    recipe_comp = conn.execute(
-        "SELECT ingredient_id FROM components WHERE component_id = ? AND recipe_id = ?",
-        (component_id, batch["recipe_id"]),
-    ).fetchone()
-    if recipe_comp is None:
-        raise db.NotFoundError(
-            f"Component id={component_id} not found on recipe_id={batch['recipe_id']}."
-        )
-    ingredient_id = recipe_comp["ingredient_id"]
-
-    # Trigger copy
-    db.copy_recipe_components_to_batch(conn, batch["recipe_id"], batch_id)
+    # Trigger copy, getting the exact old->new id for every component
+    mapping = db.copy_recipe_components_to_batch(conn, batch["recipe_id"], batch_id)
     conn.execute(
         "UPDATE batches SET recipe_changes = 1 WHERE batch_id = ?", (batch_id,)
     )
 
-    # Find the newly created batch-level component for the same ingredient
-    batch_comp = conn.execute(
-        "SELECT component_id FROM components WHERE batch_id = ? AND ingredient_id = ?",
-        (batch_id, ingredient_id),
-    ).fetchone()
-    if batch_comp is None:
+    if component_id not in mapping:
         raise db.NotFoundError(
-            f"Failed to find batch-level component for ingredient_id={ingredient_id}."
+            f"Component id={component_id} not found on recipe_id={batch['recipe_id']}."
         )
-    return batch_comp["component_id"]
+    return mapping[component_id]
 
 
 def modify_batch_ingredient(
@@ -926,5 +949,11 @@ def _format_components(components) -> list[dict]:
             "quantity_multiple": c["quantity_multiple"],
             "portion_unit":    c["portion_unit"],
             "portion_grams":   c["portion_grams"],
+            "original_quantity_text": c["original_quantity_text"],
+            "calories":        c["calories"],
+            "protein_grams":   c["protein_grams"],
+            "fat_grams":       c["fat_grams"],
+            "carb_grams":      c["carb_grams"],
+            "fiber_grams":     c["fiber_grams"],
         })
     return result

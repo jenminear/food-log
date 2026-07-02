@@ -46,6 +46,7 @@ class ComponentSummary(BaseModel):
     quantity_multiple: float
     portion_unit:     str
     portion_grams:    float
+    original_quantity_text: Optional[str] = None
     # Per-100g nutrition values from the ingredients table, used by the
     # client to compute recipe-specific totals (value * portion_grams/100 * quantity_multiple)
     calories:         Optional[float] = None
@@ -67,6 +68,7 @@ class NutritionCandidate(BaseModel):
     carb_grams:           Optional[float] = None
     fiber_grams:          Optional[float] = None
     nutrition_info_source: Optional[str]  = None
+    data_quality_warning: Optional[str]  = None
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +99,17 @@ class RecipeResponse(BaseModel):
     vegetarian:       bool
     source:           Optional[str]
     picture_path:     Optional[str]
+    is_locked:        bool = False
     components:       list[ComponentSummary] = []
 
 
 class ExtractedIngredient(BaseModel):
     """One ingredient as written in a source recipe (before USDA resolution)."""
-    name:     str
-    quantity: Optional[float] = None
-    unit:     Optional[str] = None
+    name:        str
+    quantity:    Optional[float] = None
+    unit:        Optional[str] = None
+    search_name: Optional[str] = None
+    original_quantity_text: Optional[str] = None
 
 
 class ExtractedRecipeResponse(BaseModel):
@@ -122,6 +127,19 @@ class ExtractedRecipeResponse(BaseModel):
 
 class RecipeUrlRequest(BaseModel):
     url: str = Field(..., min_length=1)
+
+
+class WeightEstimateRequest(BaseModel):
+    """Last-resort AI weight estimate when table/density conversion fails."""
+    ingredient_name: str = Field(..., min_length=1)
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+
+
+class WeightEstimateResponse(BaseModel):
+    found:      bool
+    grams:      Optional[float] = None
+    confidence: Optional[str]   = None
 
 
 class RecipeSummary(BaseModel):
@@ -175,6 +193,7 @@ class IngredientSummary(BaseModel):
     fat_grams:       Optional[float] = None
     carb_grams:      Optional[float] = None
     fiber_grams:     Optional[float] = None
+    data_quality_warning: Optional[str] = None
 
 
 class IngredientDetailResponse(IngredientSummary):
@@ -188,6 +207,21 @@ class IngredientUpdateRequest(BaseModel):
     ingredient_name:       Optional[str]   = Field(None, min_length=1)
     portion_unit:          Optional[str]   = Field(None, min_length=1)
     portion_grams:         Optional[float] = Field(None, gt=0)
+    calories:              Optional[float] = None
+    protein_grams:         Optional[float] = None
+    fat_grams:             Optional[float] = None
+    carb_grams:            Optional[float] = None
+    fiber_grams:           Optional[float] = None
+    nutrition_info_source: Optional[str]   = None
+
+
+class IngredientCreateRequest(BaseModel):
+    """Add a single standalone ingredient directly — no USDA/OFF lookup.
+    For things like a homemade item or anything where the user already has
+    nutrition info on hand (e.g. an ice cream sandwich's label)."""
+    ingredient_name:       str             = Field(..., min_length=1)
+    portion_unit:          str             = Field("g", min_length=1)
+    portion_grams:         float           = Field(100.0, gt=0)
     calories:              Optional[float] = None
     protein_grams:         Optional[float] = None
     fat_grams:             Optional[float] = None
@@ -219,22 +253,31 @@ class IngredientResolveRequest(BaseModel):
 class ComponentAddRequest(BaseModel):
     ingredient_id:     int   = Field(..., ge=1)
     quantity_multiple: float = Field(..., gt=0)
+    original_quantity_text: Optional[str] = None
 
 
 class ComponentUpdateRequest(BaseModel):
     quantity_multiple: float = Field(..., gt=0)
+    original_quantity_text: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
 # Batches
 # ---------------------------------------------------------------------------
 
+class BatchSummary(BaseModel):
+    """One entry in a recipe's batch-date history list."""
+    batch_id: int
+    date:     str
+
+
 class BatchResponse(BaseModel):
-    status:      str   # "created" | "ambiguous" | "not_found"
+    status:      str   # "created" | "ambiguous" | "not_found" | "ok"
     batch_id:    Optional[int]
     recipe_id:   Optional[int]
     recipe_name: Optional[str]
     batch_date:  str
+    is_editable: bool = False
     components:  Optional[list[ComponentSummary]]
     candidates:  Optional[list[RecipeSummary]]   # populated when ambiguous
 
@@ -319,6 +362,58 @@ class MealSearchResponse(BaseModel):
     ingredients:    list[dict]
 
 
+class MealCreateRequest(BaseModel):
+    """
+    Create a meal directly — no session. If `recipe_id` is given, the meal
+    is linked to that recipe's most recent batch (a "batch meal"); leave it
+    unset for a standalone meal built from individually logged ingredients
+    (add them afterward via POST /meals/{meal_id}/components).
+    """
+    meal_type:  str  = Field(...)
+    meal_date:  Optional[str] = None   # ISO-8601 YYYY-MM-DD; defaults to today
+    recipe_id:  Optional[int] = Field(None, ge=1)
+    fraction_of_batch: float = Field(1.0, gt=0, le=1)
+
+    @field_validator("meal_type")
+    @classmethod
+    def validate_meal_type(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in VALID_MEAL_TYPES:
+            raise ValueError(
+                f"Invalid meal_type '{v}'. "
+                f"Must be one of: {sorted(VALID_MEAL_TYPES)}"
+            )
+        return v
+
+    @field_validator("meal_date")
+    @classmethod
+    def validate_date(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            try:
+                date.fromisoformat(v)
+            except ValueError:
+                raise ValueError("meal_date must be ISO-8601 (YYYY-MM-DD).")
+        return v
+
+    @field_validator("fraction_of_batch", mode="before")
+    @classmethod
+    def parse_fraction(cls, v):
+        """Accepts plain decimals (0.5) or fraction strings ("1/3")."""
+        if isinstance(v, str):
+            v = v.strip()
+            if "/" in v:
+                num, _, den = v.partition("/")
+                try:
+                    num, den = float(num), float(den)
+                except ValueError:
+                    raise ValueError(f"Invalid fraction '{v}'.")
+                if den == 0:
+                    raise ValueError("Fraction denominator cannot be zero.")
+                return num / den
+            return float(v)
+        return v
+
+
 class MealSelectRecipeRequest(BaseModel):
     session_key:       str
     recipe_id:         int  = Field(..., ge=1)
@@ -349,7 +444,9 @@ class MealNutritionDetail(BaseModel):
     meal_type:         str
     timestamp:         Optional[int]
     source:            str   # "batch" | "ingredients"
+    recipe_id:         Optional[int] = None
     recipe_name:       Optional[str]
+    batch_id:          Optional[int] = None
     fraction_of_batch: Optional[float]
     components:        list[dict]
     nutrition:         NutritionDisplay
@@ -362,12 +459,13 @@ class DailyNutritionResponse(BaseModel):
 
 
 class AggregateNutritionResponse(BaseModel):
-    start_date:     str
-    end_date:       str
-    num_days:       int
-    num_meals:      int
-    totals:         NutritionDisplay
-    daily_averages: NutritionDisplay
+    start_date:         str
+    end_date:           str
+    num_days:           int
+    num_days_with_data: int
+    num_meals:          int
+    totals:             NutritionDisplay
+    daily_averages:     NutritionDisplay
 
 
 # ---------------------------------------------------------------------------

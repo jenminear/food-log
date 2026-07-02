@@ -20,12 +20,13 @@ from dependencies import (
 )
 from models import (
     BatchModifyRequest, BatchModifyResponse, BatchResponse,
-    ComponentSummary, IngredientConfirmRequest, IngredientResult,
+    ComponentAddRequest, ComponentSummary, ComponentUpdateRequest,
+    IngredientConfirmRequest, IngredientResult,
     MessageResponse, NoteResponse, NutritionCandidate,
     RecipeSummary,
 )
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 
 router = APIRouter(prefix="/batches", tags=["Batches"])
 
@@ -57,6 +58,7 @@ def _build_batch_response(result: dict) -> BatchResponse:
         recipe_id   = result["recipe_id"],
         recipe_name = result["recipe_name"],
         batch_date  = result["batch_date"],
+        is_editable = result["status"] == "created",  # a just-created batch is always the latest
         components  = components,
         candidates  = candidates,
     )
@@ -66,6 +68,23 @@ def _ext(filename: str | None) -> str:
     if filename and "." in filename:
         return "." + filename.rsplit(".", 1)[-1].lower()
     return ".jpg"
+
+
+def _row_to_component_summary(row) -> ComponentSummary:
+    return ComponentSummary(
+        component_id      = row["component_id"],
+        ingredient_id     = row["ingredient_id"],
+        ingredient_name   = row["ingredient_name"],
+        quantity_multiple = row["quantity_multiple"],
+        portion_unit      = row["portion_unit"],
+        portion_grams     = row["portion_grams"],
+        original_quantity_text = row["original_quantity_text"],
+        calories          = row["calories"],
+        protein_grams     = row["protein_grams"],
+        fat_grams         = row["fat_grams"],
+        carb_grams        = row["carb_grams"],
+        fiber_grams       = row["fiber_grams"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -107,17 +126,24 @@ def create_batch(
     summary="Create a batch directly from a recipe ID",
 )
 def create_batch_from_recipe(
-    recipe_id:  int,
-    conn:       DbConn,
-    _:          Auth,
-    batch_date: str | None = None,
+    recipe_id:       int,
+    conn:            DbConn,
+    _:               Auth,
+    batch_date:      str | None = None,
+    source_batch_id: int | None = Query(
+        None, description="Mirror this batch's current ingredients and notes instead of the "
+                           "recipe's (e.g. 'Cook This' from a past batch should reproduce what "
+                           "was actually cooked, including substitutions)."),
 ):
     try:
         result = App.create_batch_from_recipe_id(
-            conn, recipe_id, batch_date=batch_date
+            conn, recipe_id, batch_date=batch_date,
+            source_batch_id=source_batch_id,
         )
     except db.NotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
+    except db.ValidationError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     return _build_batch_response(result)
 
 
@@ -141,26 +167,102 @@ def get_batch(batch_id: int, conn: DbConn, _: Auth):
     else:
         raw_comps = db.get_components(conn, recipe_id=batch["recipe_id"])
 
-    components = [
-        ComponentSummary(
-            component_id     = c["component_id"],
-            ingredient_id    = c["ingredient_id"],
-            ingredient_name  = c["ingredient_name"],
-            quantity_multiple = c["quantity_multiple"],
-            portion_unit     = c["portion_unit"],
-            portion_grams    = c["portion_grams"],
-        )
-        for c in raw_comps
-    ]
+    components = [_row_to_component_summary(c) for c in raw_comps]
+    is_editable = db.is_latest_batch(conn, batch_id)
     return BatchResponse(
         status      = "ok",
         batch_id    = batch["batch_id"],
         recipe_id   = batch["recipe_id"],
         recipe_name = batch["recipe_name"],
         batch_date  = batch["date"],
+        is_editable = is_editable,
         components  = components,
         candidates  = None,
     )
+
+
+@router.delete(
+    "/{batch_id}",
+    response_model=MessageResponse,
+    summary="Delete a batch (only the most recent batch, only if no meals logged against it)",
+)
+def delete_batch(batch_id: int, conn: DbConn, _: Auth):
+    try:
+        db.delete_batch(conn, batch_id)
+        conn.commit()
+    except db.NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
+    except db.ValidationError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(e))
+    return MessageResponse(message=f"Batch {batch_id} deleted.")
+
+
+# ---------------------------------------------------------------------------
+# Batch components (by already-resolved ingredient_id — mirrors the
+# recipe-level component endpoints in routers/recipes.py, but for batches.
+# Used by the RecipeDetail "Cook This" editing flow, which already resolves
+# ingredients via /recipes/ingredients/resolve before adding them.
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{batch_id}/components",
+    response_model=ComponentSummary,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add an ingredient (component) to a batch",
+)
+def add_batch_component(batch_id: int, req: ComponentAddRequest, conn: DbConn, _: Auth):
+    try:
+        component_id = db.add_batch_ingredient(
+            conn, batch_id, req.ingredient_id, req.quantity_multiple,
+            original_quantity_text=req.original_quantity_text,
+        )
+        conn.commit()
+    except db.NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
+    except db.ValidationError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    rows = db.get_components(conn, batch_id=batch_id)
+    row = next(r for r in rows if r["component_id"] == component_id)
+    return _row_to_component_summary(row)
+
+
+@router.patch(
+    "/{batch_id}/components/{component_id}",
+    response_model=ComponentSummary,
+    summary="Update a batch component's quantity",
+)
+def update_batch_component(
+    batch_id: int, component_id: int, req: ComponentUpdateRequest, conn: DbConn, _: Auth,
+):
+    try:
+        resolved_id = App._resolve_batch_component_id(conn, batch_id, component_id)
+        db.update_batch_ingredient_quantity(
+            conn, batch_id, resolved_id, req.quantity_multiple,
+            original_quantity_text=req.original_quantity_text,
+            update_original_quantity_text=True,
+        )
+        conn.commit()
+    except db.NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
+    except db.ValidationError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    rows = db.get_components(conn, batch_id=batch_id)
+    row = next(r for r in rows if r["component_id"] == resolved_id)
+    return _row_to_component_summary(row)
+
+
+@router.delete(
+    "/{batch_id}/components/{component_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove an ingredient (component) from a batch",
+)
+def delete_batch_component(batch_id: int, component_id: int, conn: DbConn, _: Auth):
+    try:
+        resolved_id = App._resolve_batch_component_id(conn, batch_id, component_id)
+        db.remove_batch_ingredient(conn, batch_id, resolved_id)
+        conn.commit()
+    except db.NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
 
 
 # ---------------------------------------------------------------------------

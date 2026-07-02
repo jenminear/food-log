@@ -656,7 +656,7 @@ class TestEndToEnd(unittest.TestCase):
         )
         # Pre-seed both ingredients so no lookup needed
         db.create_ingredient(conn, "Tofu",
-                              portion_unit="g", portion_grams=100.0,
+                              portion_unit="100g serving", portion_grams=100.0,
                               calories=76, protein_grams=8.0,
                               fat_grams=4.0, carb_grams=2.0, fiber_grams=0.3)
         db.create_ingredient(conn, "Bok Choy",

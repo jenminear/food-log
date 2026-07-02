@@ -70,7 +70,9 @@ def daily_nutrition(
             meal_type         = m["meal_type"],
             timestamp         = m.get("timestamp"),
             source            = m["source"],
+            recipe_id         = m.get("recipe_id"),
             recipe_name       = m.get("recipe_name"),
+            batch_id          = m.get("batch_id"),
             fraction_of_batch = m.get("fraction_of_batch"),
             components        = m.get("components", []),
             nutrition         = _make_nutrition_display(m["nutrition"]),
@@ -115,10 +117,11 @@ def range_nutrition(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
     return AggregateNutritionResponse(
-        start_date     = report["start_date"],
-        end_date       = report["end_date"],
-        num_days       = report["num_days"],
-        num_meals      = report["num_meals"],
-        totals         = _make_nutrition_display(report["totals"]),
-        daily_averages = _make_nutrition_display(report["daily_averages"]),
+        start_date         = report["start_date"],
+        end_date           = report["end_date"],
+        num_days           = report["num_days"],
+        num_days_with_data = report["num_days_with_data"],
+        num_meals          = report["num_meals"],
+        totals             = _make_nutrition_display(report["totals"]),
+        daily_averages     = _make_nutrition_display(report["daily_averages"]),
     )

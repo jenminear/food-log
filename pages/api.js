@@ -44,17 +44,22 @@ export const health = () => get('/health')
 
 // ── Recipes ───────────────────────────────────────────────────────────────
 export const searchRecipes       = q                => get(`/recipes/search?q=${encodeURIComponent(q)}`)
-export const searchIngredient    = (q, externalOnly = false) => get(`/recipes/ingredients/search?q=${encodeURIComponent(q)}${externalOnly ? '&external_only=true' : ''}`)
+export const searchIngredient    = (q, externalOnly = false, limit = 5) => get(`/recipes/ingredients/search?q=${encodeURIComponent(q)}${externalOnly ? '&external_only=true' : ''}&limit=${limit}`)
 export const searchIngredientLocal = q              => get(`/recipes/ingredients/local-search?q=${encodeURIComponent(q)}`)
 export const resolveIngredient    = body            => post('/recipes/ingredients/resolve', body)
 export const getIngredient        = id              => get(`/recipes/ingredients/${id}`)
 export const updateIngredient     = (id, body)      => patch(`/recipes/ingredients/${id}`, body)
+export const browseIngredients    = q                => get(`/recipes/ingredients?q=${encodeURIComponent(q)}`)
+export const createIngredient     = body             => post('/recipes/ingredients', body)
+export const deleteIngredient     = id               => del(`/recipes/ingredients/${id}`)
 export const addRecipeComponent   = (id, body)      => post(`/recipes/${id}/components`, body)
 export const updateRecipeComponent = (id, cid, body) => patch(`/recipes/${id}/components/${cid}`, body)
 export const deleteRecipeComponent = (id, cid)      => del(`/recipes/${id}/components/${cid}`)
 export const getRecipe           = id               => get(`/recipes/${id}`)
 export const createRecipe        = body             => post('/recipes', body)
 export const updateRecipe        = (id, body)       => put(`/recipes/${id}`, body)
+export const deleteRecipe        = id               => del(`/recipes/${id}`)
+export const getRecipeBatches    = id               => get(`/recipes/${id}/batches`)
 export const addRecipeIngredient = (key, body)      => post(`/recipes/${key}/ingredients`, body)
 export const confirmRecipeIngredient = (key, body)  => post(`/recipes/${key}/ingredients/confirm`, body)
 export const addRecipeNote       = (key, body)      => post(`/recipes/${key}/notes`, body)
@@ -70,19 +75,23 @@ export const extractRecipeFromImage = file         => {
   form.append('file', file)
   return upload('/recipes/extract/image', form)
 }
+export const estimateIngredientWeight = (ingredientName, quantity, unit) =>
+  post('/recipes/ingredients/estimate-weight', { ingredient_name: ingredientName, quantity, unit })
 
 // ── Batches ───────────────────────────────────────────────────────────────
-export const createBatch          = q               => post(`/batches?recipe_query=${encodeURIComponent(q)}`)
-export const createBatchFromId    = (id, date)      => post(`/batches/from-recipe/${id}${date ? `?batch_date=${date}` : ''}`)
-export const getBatch             = id              => get(`/batches/${id}`)
-export const modifyBatch          = (id, body)      => patch(`/batches/${id}`, body)
-export const confirmBatchIngredient = (id, body)    => post(`/batches/${id}/ingredients/confirm`, body)
-export const addBatchNote         = (id, note)      => post(`/batches/${id}/notes?note_txt=${encodeURIComponent(note)}`)
-export const uploadBatchImage     = (id, file)      => {
-  const form = new FormData()
-  form.append('file', file)
-  return upload(`/batches/${id}/image`, form)
+export const createBatchFromId    = (id, { date, sourceBatchId } = {}) => {
+  const params = new URLSearchParams()
+  if (date) params.set('batch_date', date)
+  if (sourceBatchId) params.set('source_batch_id', sourceBatchId)
+  const qs = params.toString()
+  return post(`/batches/from-recipe/${id}${qs ? `?${qs}` : ''}`)
 }
+export const getBatch             = id              => get(`/batches/${id}`)
+export const deleteBatch          = id              => del(`/batches/${id}`)
+export const addBatchComponent    = (batchId, body) => post(`/batches/${batchId}/components`, body)
+export const updateBatchComponent = (batchId, cid, body) => patch(`/batches/${batchId}/components/${cid}`, body)
+export const deleteBatchComponent = (batchId, cid)  => del(`/batches/${batchId}/components/${cid}`)
+export const addBatchNote         = (id, note)      => post(`/batches/${id}/notes?note_txt=${encodeURIComponent(note)}`)
 
 // ── Meals ─────────────────────────────────────────────────────────────────
 export const startMeal            = body            => post('/meals/start', body)
@@ -93,6 +102,10 @@ export const confirmMealIngredient = (key, body)    => post(`/meals/${key}/ingre
 export const addMealNote          = (key, note)     => post(`/meals/${key}/notes?note_txt=${encodeURIComponent(note)}`)
 export const finishMeal           = key             => post(`/meals/${key}/finish`)
 export const getMeal              = id              => get(`/meals/${id}`)
+export const createMeal           = body             => post('/meals', body)
+export const addMealComponent     = (id, body)       => post(`/meals/${id}/components`, body)
+export const deleteMealComponent  = (id, cid)        => del(`/meals/${id}/components/${cid}`)
+export const deleteMeal           = id              => del(`/meals/${id}`)
 
 // ── Nutrition ─────────────────────────────────────────────────────────────
 export const getDailyNutrition    = date            => get(`/nutrition/daily${date ? `?date=${date}` : ''}`)

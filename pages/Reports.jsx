@@ -59,6 +59,9 @@ export default function Reports() {
           <div className="card">
             <div className="card-header">
               <h2>Daily Averages</h2>
+              <span className="text-faint text-sm">
+                {data.num_days_with_data} day{data.num_days_with_data === 1 ? '' : 's'} with data
+              </span>
             </div>
             <NutGrid data={data.daily_averages} />
           </div>

@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS components (
     meal_id             INTEGER,                            -- set for standalone meal ingredients
     ingredient_id       INTEGER NOT NULL,                   -- [R]
     quantity_multiple   REAL    NOT NULL,                   -- [R] multiplier on base_quantity
+    original_quantity_text TEXT,                             -- amount as originally written in the
+                                                              -- source recipe (e.g. "2 tbsp"), display-only
 
     -- Enforce that exactly one parent FK is set
     CHECK (

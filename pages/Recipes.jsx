@@ -187,7 +187,7 @@ export default function Recipes() {
       {/* URL Modal */}
       {showUrlModal && (
         <div className="modal-overlay" onClick={() => setShowUrlModal(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{maxWidth:'700px'}}>
             <h3>Enter Recipe URL</h3>
             <div className="form-group">
               <label>Web Address</label>
@@ -196,6 +196,7 @@ export default function Recipes() {
                 value={recipeUrl}
                 onChange={e => setRecipeUrl(e.target.value)}
                 placeholder="https://example.com/recipe"
+                style={{width:'100%', padding:'0.75rem', fontSize:'1rem'}}
               />
             </div>
             {extracting && (

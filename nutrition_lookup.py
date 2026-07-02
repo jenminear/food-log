@@ -133,6 +133,60 @@ class NutritionResult:
             f"{cal}, {prot} per 100g  |  portion: {portion}"
         )
 
+    def data_quality_warning(self) -> Optional[str]:
+        """See `compute_data_quality_warning`."""
+        return compute_data_quality_warning(
+            calories=self.calories,
+            protein_grams=self.protein_grams,
+            fat_grams=self.fat_grams,
+            carb_grams=self.carb_grams,
+            portion_unit=self.portion_unit,
+        )
+
+
+# Portion-unit strings that are nutrient/measurement codes rather than an
+# actual serving description — a sign the data source's portion data is
+# unreliable for this entry (e.g. a branded food whose serving size was
+# entered as "IU", which is a vitamin-A unit, not a quantity of food).
+SUSPECT_PORTION_UNITS = {"iu"}
+
+
+def compute_data_quality_warning(
+    *,
+    calories: Optional[float],
+    protein_grams: Optional[float],
+    fat_grams: Optional[float],
+    carb_grams: Optional[float],
+    portion_unit: Optional[str],
+) -> Optional[str]:
+    """
+    Returns a human-readable warning if this nutrition data has known gaps
+    or red flags, or None if it looks complete and trustworthy. Surfaced to
+    the user so they know to double-check the source (or find another)
+    rather than silently trusting incomplete/wrong data.
+
+    Fiber is deliberately excluded from the "missing" check — it's null on
+    a large fraction of otherwise-good USDA/OFF entries, so including it
+    would make the warning fire too often to be a useful signal.
+    """
+    reasons = []
+    missing = [
+        n for n, v in [
+            ("calories", calories), ("protein", protein_grams),
+            ("fat", fat_grams), ("carbs", carb_grams),
+        ] if v is None
+    ]
+    if missing:
+        reasons.append(f"missing {', '.join(missing)}")
+    if (portion_unit or "").strip().lower() in SUSPECT_PORTION_UNITS:
+        reasons.append(f"unusual portion unit '{portion_unit}'")
+    if not reasons:
+        return None
+    return (
+        "USDA/OFF data may be incomplete (" + "; ".join(reasons) + ") "
+        "— verify this ingredient's nutrition independently."
+    )
+
 
 def result_to_db_kwargs(result: NutritionResult) -> dict:
     """
@@ -217,13 +271,17 @@ class NoResultsError(LookupError):
 # USDA FoodData Central
 # ---------------------------------------------------------------------------
 
-# Nutrient IDs in USDA FoodData Central
+# Nutrient IDs in USDA FoodData Central. Values are lists of IDs to try in
+# order — most foods report energy under plain "Energy" (1008), but
+# Foundation-type entries often omit 1008 and report only the
+# Atwater-factor breakdowns instead, so we fall back to those rather than
+# treating the food as having no calorie data at all.
 _USDA_NUTRIENT_IDS = {
-    "calories":      1008,   # Energy (kcal)
-    "protein_grams": 1003,   # Protein
-    "fat_grams":     1004,   # Total lipids (fat)
-    "carb_grams":    1005,   # Carbohydrate, by difference
-    "fiber_grams":   1079,   # Fiber, total dietary
+    "calories":      [1008, 2047, 2048],  # Energy / Atwater General / Atwater Specific (kcal)
+    "protein_grams": [1003],              # Protein
+    "fat_grams":     [1004],              # Total lipids (fat)
+    "carb_grams":    [1005],              # Carbohydrate, by difference
+    "fiber_grams":   [1079],              # Fiber, total dietary
 }
 
 # Preferred portion unit keywords (matched against USDA measure descriptions)
@@ -255,14 +313,32 @@ def _extract_usda_nutrients(food: dict) -> dict[str, Optional[float]]:
         nid = n["nutrient"]["id"] if "nutrient" in n else n.get("nutrientId")
         if nid is not None:
             nutrient_map[nid] = n
-    for key, nid in _USDA_NUTRIENT_IDS.items():
-        entry = nutrient_map.get(nid)
-        if entry is None:
-            nutrients[key] = None
-            continue
-        value = entry["amount"] if "amount" in entry else entry.get("value")
+    for key, nids in _USDA_NUTRIENT_IDS.items():
+        value = None
+        for nid in nids:
+            entry = nutrient_map.get(nid)
+            if entry is None:
+                continue
+            value = entry["amount"] if "amount" in entry else entry.get("value")
+            if value is not None:
+                break
         nutrients[key] = round(value, 2) if value is not None else None
     return nutrients
+
+
+# USDA sometimes falls back to its internal UN/CEFACT unit abbreviation
+# code (from foodPortions.modifier) instead of a human-readable unit when
+# no portion description is available — e.g. "GRM" instead of "g", "MLT"
+# instead of "ml". Normalize these to the equivalent everyday unit so they
+# read correctly and the gram/volume conversion logic recognizes them.
+_USDA_UNIT_ABBREVIATIONS = {
+    "grm": "g", "mgm": "mg", "kgm": "kg",
+    "mlt": "ml", "ltr": "l",
+}
+
+
+def _normalize_usda_unit(unit: str) -> str:
+    return _USDA_UNIT_ABBREVIATIONS.get(unit.strip().lower(), unit)
 
 
 def _extract_usda_portions(food: dict) -> tuple[str, float, list]:
@@ -275,7 +351,7 @@ def _extract_usda_portions(food: dict) -> tuple[str, float, list]:
     all_portions = []
 
     for m in measures:
-        desc        = m.get("disseminationText", m.get("measureDescription", ""))
+        desc        = _normalize_usda_unit(m.get("disseminationText", m.get("measureDescription", "")))
         grams       = m.get("gramWeight")
         if grams and desc:
             all_portions.append({
@@ -295,7 +371,7 @@ def _extract_usda_portions(food: dict) -> tuple[str, float, list]:
             desc = p.get("portionDescription", "")
             if not desc or desc.lower() == "quantity not specified":
                 amount   = p.get("amount")
-                modifier = p.get("modifier", "")
+                modifier = _normalize_usda_unit(p.get("modifier", ""))
                 if not modifier or modifier.lower() == "undetermined" or modifier.isdigit():
                     continue
                 desc = f"{amount:g} {modifier}" if amount else modifier
@@ -307,7 +383,7 @@ def _extract_usda_portions(food: dict) -> tuple[str, float, list]:
     # Check top-level serving size (Branded foods)
     if not all_portions:
         srv_size = food.get("servingSize")
-        srv_unit = food.get("servingSizeUnit", "g")
+        srv_unit = _normalize_usda_unit(food.get("servingSizeUnit", "g"))
         if srv_size:
             all_portions.append({
                 "unit":   srv_unit,
@@ -379,7 +455,7 @@ def _score_usda_result(query: str, food: dict) -> float:
 
 
 def _search_usda(
-    query: str, api_key: str, max_results: int = 10
+    query: str, api_key: str, max_results: int = 10, max_detail_fetches: int = 3
 ) -> list[NutritionResult]:
     """
     Search USDA FoodData Central and return NutritionResult candidates.
@@ -428,10 +504,12 @@ def _search_usda(
         ))
 
     # Step 2: keep only the top candidates, then fetch full detail for the
-    # top 3 to get portion data
+    # top N to get portion data (callers requesting more candidates via
+    # "more options" should also get real portion data for them, not just
+    # the "g" / 1g placeholder default)
     results.sort(key=lambda r: -r.confidence)
     results = results[:max_results]
-    for result in results[:3]:
+    for result in results[:max_detail_fetches]:
         try:
             detail = _get_json(
                 f"{USDA_API_BASE}/food/{result.source_id}",
@@ -602,7 +680,11 @@ def lookup(
 
     # USDA first
     try:
-        usda_results = _search_usda(name, api_key, max_results=max_candidates * 2)
+        usda_results = _search_usda(
+            name, api_key,
+            max_results=max_candidates * 2,
+            max_detail_fetches=min(max_candidates, 10),
+        )
         all_results.extend(usda_results)
     except (NetworkError, RateLimitError):
         raise
