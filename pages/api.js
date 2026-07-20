@@ -4,7 +4,7 @@
  * The base URL is /api which Vite proxies to http://localhost:8000 in dev.
  */
 
-const BASE = '/api'
+const BASE = import.meta.env.VITE_API_BASE || '/api'
 
 // Read optional API key from localStorage (set via Settings page later)
 const apiKey = () => localStorage.getItem('food_log_api_key') || ''
@@ -50,6 +50,7 @@ export const resolveIngredient    = body            => post('/recipes/ingredient
 export const getIngredient        = id              => get(`/recipes/ingredients/${id}`)
 export const updateIngredient     = (id, body)      => patch(`/recipes/ingredients/${id}`, body)
 export const browseIngredients    = q                => get(`/recipes/ingredients?q=${encodeURIComponent(q)}`)
+export const browseIngredientsByLetter = letter      => get(`/recipes/ingredients?letter=${encodeURIComponent(letter)}`)
 export const createIngredient     = body             => post('/recipes/ingredients', body)
 export const deleteIngredient     = id               => del(`/recipes/ingredients/${id}`)
 export const addRecipeComponent   = (id, body)      => post(`/recipes/${id}/components`, body)
@@ -77,6 +78,9 @@ export const extractRecipeFromImage = file         => {
 }
 export const estimateIngredientWeight = (ingredientName, quantity, unit) =>
   post('/recipes/ingredients/estimate-weight', { ingredient_name: ingredientName, quantity, unit })
+export const setRecipeImageFromUrl  = (id, url)   => post(`/recipes/${id}/image-from-url?url=${encodeURIComponent(url)}`)
+export const browseCategories       = ()           => get('/recipes/browse/categories')
+export const browseRecipes          = (category = 'all') => get(`/recipes/browse?category=${encodeURIComponent(category)}`)
 
 // ── Batches ───────────────────────────────────────────────────────────────
 export const createBatchFromId    = (id, { date, sourceBatchId } = {}) => {

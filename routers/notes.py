@@ -8,6 +8,7 @@ DELETE /notes/{note_id}      Delete a note
 """
 
 from __future__ import annotations
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -55,9 +56,9 @@ def add_note(req: NoteRequest, conn: DbConn, _: Auth):
 def get_notes(
     conn:      DbConn,
     _:         Auth,
-    recipe_id: int | None = Query(None),
-    batch_id:  int | None = Query(None),
-    meal_id:   int | None = Query(None),
+    recipe_id: Optional[int] = Query(None),
+    batch_id:  Optional[int] = Query(None),
+    meal_id:   Optional[int] = Query(None),
 ):
     """
     Supply exactly one of `recipe_id`, `batch_id`, or `meal_id`.

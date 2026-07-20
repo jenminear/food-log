@@ -86,6 +86,7 @@ class ExtractedRecipe:
     vegan:            bool = False
     ingredients:      list[ExtractedIngredient] = field(default_factory=list)
     steps:            list[str] = field(default_factory=list)
+    image_url:        Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +117,14 @@ def extract_recipe_from_url(url: str, api_key: str) -> ExtractedRecipe:
     if not page_text.strip():
         raise FetchError("The page appears to have no readable content.")
 
+    image_url = _extract_og_image(resp.text)
+
     content_blocks = [
         {"type": "text", "text": f"Web page content:\n\n{page_text}"},
     ]
-    return _call_claude_extract(content_blocks, api_key)
+    result = _call_claude_extract(content_blocks, api_key)
+    result.image_url = image_url
+    return result
 
 
 def extract_recipe_from_image(data: bytes, media_type: str, api_key: str) -> ExtractedRecipe:
@@ -139,6 +144,18 @@ def extract_recipe_from_image(data: bytes, media_type: str, api_key: str) -> Ext
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+def _extract_og_image(html: str) -> Optional[str]:
+    """Return the og:image URL from the page, or None if not found."""
+    soup = BeautifulSoup(html, "html.parser")
+    for attr in ("og:image", "twitter:image", "twitter:image:src"):
+        tag = soup.find("meta", property=attr) or soup.find("meta", attrs={"name": attr})
+        if tag:
+            url = tag.get("content", "").strip()
+            if url and url.startswith("http"):
+                return url
+    return None
+
 
 def _extract_page_text(html: str) -> str:
     """Strip non-content tags and collapse whitespace, truncating to a safe length."""

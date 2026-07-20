@@ -12,6 +12,7 @@ GET    /meals/{meal_id}                 Get a meal record
 """
 
 from __future__ import annotations
+from typing import Optional
 
 from datetime import date as _date
 
@@ -82,7 +83,7 @@ def _session_response(session: App.RecordMealSession, session_key: str) -> MealS
     )
 
 
-def _row_to_meal_response(row, recipe_name: str | None = None) -> MealResponse:
+def _row_to_meal_response(row, recipe_name: Optional[str] = None) -> MealResponse:
     return MealResponse(
         meal_id           = row["meal_id"],
         meal_type         = row["meal_type"],

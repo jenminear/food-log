@@ -73,6 +73,7 @@ def daily_nutrition(
             recipe_id         = m.get("recipe_id"),
             recipe_name       = m.get("recipe_name"),
             batch_id          = m.get("batch_id"),
+            batch_date        = m.get("batch_date"),
             fraction_of_batch = m.get("fraction_of_batch"),
             components        = m.get("components", []),
             nutrition         = _make_nutrition_display(m["nutrition"]),

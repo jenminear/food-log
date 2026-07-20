@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   searchRecipes, searchIngredientLocal, searchIngredient, resolveIngredient,
-  createMeal, addMealComponent,
+  createMeal, addMealComponent, getBatch, getRecipeBatches,
 } from './api.js'
 import { isGramUnit, computeCalories, isHighCalorieOutlier } from './unitConversion.js'
 
@@ -17,11 +17,13 @@ const MEAL_TYPES = [
 const EMPTY_MANUAL = {
   ingredient_name: '',
   portion_unit: '',
+  portion_grams: '',
   calories: '',
   protein_grams: '',
   fat_grams: '',
   carb_grams: '',
   fiber_grams: '',
+  nutrition_info_source: '',
 }
 
 function scaled(value, portionGrams, quantityMultiple) {
@@ -39,6 +41,7 @@ export default function LogMealModal({ date, onClose, onLogged }) {
   // ingredients — picking one clears the other.
   const [selectedRecipe, setSelectedRecipe] = useState(null)
   const [fractionOfBatch, setFractionOfBatch] = useState('1')
+  const [batchTotalCalories, setBatchTotalCalories] = useState(null)
   const [pendingIngredients, setPendingIngredients] = useState([])
 
   // ── Search / resolve panel — same pattern as RecipeDetail's
@@ -125,9 +128,20 @@ export default function LogMealModal({ date, onClose, onLogged }) {
     return opts
   }
 
-  function pickRecipe(recipe) {
+  async function pickRecipe(recipe) {
     setSelectedRecipe(recipe)
     resetSearchPanel()
+    setBatchTotalCalories(null)
+    try {
+      const batches = await getRecipeBatches(recipe.recipe_id)
+      if (batches && batches.length > 0) {
+        const batch = await getBatch(batches[0].batch_id)
+        const total = (batch.components || []).reduce((sum, c) => {
+          return sum + (c.calories ?? 0) * ((c.portion_grams ?? 100) / 100) * (c.quantity_multiple ?? 1)
+        }, 0)
+        setBatchTotalCalories(Math.round(total))
+      }
+    } catch (_) { /* non-fatal */ }
   }
 
   function pickLocalIngredient(match) {
@@ -215,16 +229,20 @@ export default function LogMealModal({ date, onClose, onLogged }) {
     setError(null)
     try {
       const unit = manualData.portion_unit.trim()
+      const portionG = isGramUnit(unit) ? 1 : parseFloat(manualData.portion_grams) || 100
+      // Values entered per-portion; convert to per-100g for storage
+      const toP100 = v => v === '' ? null : (parseFloat(v) / portionG * 100)
       const resolved = await resolveIngredient({
         ingredient_name: manualData.ingredient_name.trim(),
         manual_data: {
           portion_unit: unit,
-          portion_grams: isGramUnit(unit) ? 1 : 100,
-          calories: manualData.calories === '' ? null : parseFloat(manualData.calories),
-          protein_grams: manualData.protein_grams === '' ? null : parseFloat(manualData.protein_grams),
-          fat_grams: manualData.fat_grams === '' ? null : parseFloat(manualData.fat_grams),
-          carb_grams: manualData.carb_grams === '' ? null : parseFloat(manualData.carb_grams),
-          fiber_grams: manualData.fiber_grams === '' ? null : parseFloat(manualData.fiber_grams),
+          portion_grams: portionG,
+          calories:      toP100(manualData.calories),
+          protein_grams: toP100(manualData.protein_grams),
+          fat_grams:     toP100(manualData.fat_grams),
+          carb_grams:    toP100(manualData.carb_grams),
+          fiber_grams:   toP100(manualData.fiber_grams),
+          nutrition_info_source: manualData.nutrition_info_source.trim() || null,
         },
       })
       setResolvedIngredient(resolved)
@@ -256,6 +274,7 @@ export default function LogMealModal({ date, onClose, onLogged }) {
 
   function clearRecipe() {
     setSelectedRecipe(null)
+    setBatchTotalCalories(null)
   }
 
   async function handleLogMeal() {
@@ -320,6 +339,20 @@ export default function LogMealModal({ date, onClose, onLogged }) {
               <input type="text" placeholder="e.g. 0.5 or 1/3"
                 value={fractionOfBatch} onChange={e => setFractionOfBatch(e.target.value)} />
             </div>
+            {batchTotalCalories != null && (() => {
+              const parseFrac = s => {
+                const m = s.trim().match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/)
+                if (m) return parseFloat(m[1]) / parseFloat(m[2])
+                return parseFloat(s) || null
+              }
+              const frac = parseFrac(fractionOfBatch)
+              const kcal = frac != null ? Math.round(batchTotalCalories * frac) : null
+              return kcal != null ? (
+                <div className="text-sm" style={{marginTop:'0.25rem', color:'var(--accent)'}}>
+                  ≈ {kcal} kcal for this fraction ({batchTotalCalories} kcal total batch)
+                </div>
+              ) : null
+            })()}
           </div>
         )}
 
@@ -484,12 +517,22 @@ export default function LogMealModal({ date, onClose, onLogged }) {
                   <input type="text" value={manualData.ingredient_name}
                     onChange={e => setManualData({...manualData, ingredient_name: e.target.value})} />
                 </div>
-                <div className="form-group">
-                  <label>Portion Unit <span style={{color:'red'}}>*</span></label>
-                  <input type="text" placeholder='e.g. "1 cup"' value={manualData.portion_unit}
-                    onChange={e => setManualData({...manualData, portion_unit: e.target.value})} />
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>Portion Unit <span style={{color:'red'}}>*</span></label>
+                    <input type="text" placeholder='e.g. "1 cup"' value={manualData.portion_unit}
+                      onChange={e => setManualData({...manualData, portion_unit: e.target.value})} />
+                  </div>
+                  <div className="form-group">
+                    <label>Portion Weight (g) <span style={{color:'red'}}>*</span></label>
+                    <input type="number" min="0.1" step="1" placeholder="e.g. 240"
+                      value={manualData.portion_grams}
+                      onChange={e => setManualData({...manualData, portion_grams: e.target.value})} />
+                  </div>
                 </div>
-                <p className="text-sm text-faint" style={{marginBottom:'0.5rem'}}>Nutrition values below are per 100g (optional):</p>
+                <p className="text-sm text-faint" style={{marginBottom:'0.5rem'}}>
+                  Nutrition values below are per 1 portion{manualData.portion_grams ? ` (${manualData.portion_grams}g)` : ''} (optional):
+                </p>
                 <div className="form-row-3">
                   {['calories','protein_grams','fat_grams','carb_grams','fiber_grams'].map(key => (
                     <div className="form-group" key={key}>
@@ -499,9 +542,15 @@ export default function LogMealModal({ date, onClose, onLogged }) {
                     </div>
                   ))}
                 </div>
+                <div className="form-group">
+                  <label>Nutrition Info Source</label>
+                  <input type="text" placeholder="e.g. Package label"
+                    value={manualData.nutrition_info_source}
+                    onChange={e => setManualData({...manualData, nutrition_info_source: e.target.value})} />
+                </div>
                 <div style={{display:'flex', gap:'0.5rem'}}>
                   <button className="btn btn-primary" onClick={submitManualEntry}
-                    disabled={!manualData.ingredient_name.trim() || !manualData.portion_unit.trim()}>
+                    disabled={!manualData.ingredient_name.trim() || !manualData.portion_unit.trim() || !manualData.portion_grams}>
                     Save Ingredient
                   </button>
                   <button className="btn btn-secondary" onClick={resetSearchPanel}>Cancel</button>

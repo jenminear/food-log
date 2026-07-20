@@ -19,6 +19,10 @@ export function Layout({ children }) {
         <NavLink to="/ingredients" className={({isActive}) => 'nav-link' + (isActive ? ' active' : '')}>
           <span className="nav-icon">🥕</span> Ingredients
         </NavLink>
+        <div className="nav-section">Account</div>
+        <NavLink to="/settings" className={({isActive}) => 'nav-link' + (isActive ? ' active' : '')}>
+          <span className="nav-icon">⚙️</span> Settings
+        </NavLink>
       </nav>
       <main className="main">
         {children}

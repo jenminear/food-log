@@ -5,6 +5,7 @@ import Reports      from './pages/Reports'
 import Recipes      from './pages/Recipes'
 import RecipeDetail from './pages/RecipeDetail'
 import Ingredients  from './pages/Ingredients'
+import Settings     from './pages/Settings'
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/recipes"        element={<Recipes />} />
         <Route path="/recipes/:id"    element={<RecipeDetail />} />
         <Route path="/ingredients"    element={<Ingredients />} />
+        <Route path="/settings"       element={<Settings />} />
       </Routes>
     </Layout>
   )

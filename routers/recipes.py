@@ -18,7 +18,7 @@ POST   /recipes/extract/image          Extract recipe data from a photo
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Optional, Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
@@ -33,7 +33,7 @@ from dependencies import (
     get_anthropic_api_key, get_usda_api_key, require_session, save_image,
 )
 from models import (
-    BatchSummary,
+    BatchSummary, BrowseCategoryCount,
     ComponentAddRequest, ComponentSummary, ComponentUpdateRequest,
     ExtractedIngredient, ExtractedRecipeResponse,
     IngredientAddRequest, IngredientConfirmRequest, IngredientCreateRequest,
@@ -41,7 +41,7 @@ from models import (
     IngredientResolveRequest, IngredientResult, IngredientSummary,
     IngredientUpdateRequest,
     MessageResponse, NoteRequest, NoteResponse,
-    RecipeRequest, RecipeResponse, RecipeSummary, RecipeUrlRequest,
+    RecipeBrowseItem, RecipeRequest, RecipeResponse, RecipeSummary, RecipeUrlRequest,
     WeightEstimateRequest, WeightEstimateResponse,
 )
 
@@ -425,14 +425,30 @@ def local_search_ingredients(
 @router.get(
     "/ingredients",
     response_model=list[IngredientSummary],
-    summary="Search the ingredients table (for the Ingredients tab — not capped like local-search)",
+    summary="Search or A-Z browse the ingredients table (for the Ingredients tab)",
 )
 def browse_ingredients(
     conn: DbConn,
     _: Auth,
-    q: str = Query(..., min_length=1, description="Ingredient name to search"),
+    q: str = Query(None, description="Ingredient name to search"),
+    letter: str = Query(None, description="A-Z letter to browse (# for non-alpha)"),
 ):
-    rows = db.search_ingredients(conn, q)
+    if letter is not None:
+        if letter == '#':
+            rows = conn.execute(
+                "SELECT * FROM ingredients WHERE UPPER(SUBSTR(ingredient_name,1,1)) NOT BETWEEN 'A' AND 'Z' "
+                "ORDER BY ingredient_name COLLATE NOCASE"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM ingredients WHERE UPPER(SUBSTR(ingredient_name,1,1)) = ? "
+                "ORDER BY ingredient_name COLLATE NOCASE",
+                (letter.upper(),),
+            ).fetchall()
+    elif q is not None and q.strip():
+        rows = db.search_ingredients(conn, q.strip())[:50]
+    else:
+        rows = []
     return [
         IngredientSummary(
             ingredient_id   = r["ingredient_id"],
@@ -450,7 +466,7 @@ def browse_ingredients(
                 portion_unit=r["portion_unit"],
             ),
         )
-        for r in rows[:50]
+        for r in rows
     ]
 
 
@@ -611,6 +627,7 @@ def _extracted_to_response(extracted: RE.ExtractedRecipe) -> ExtractedRecipeResp
             for i in extracted.ingredients
         ],
         steps            = extracted.steps,
+        image_url        = extracted.image_url,
     )
 
 
@@ -682,6 +699,62 @@ def estimate_ingredient_weight(req: WeightEstimateRequest, _: Auth):
     if estimate is None:
         return WeightEstimateResponse(found=False)
     return WeightEstimateResponse(found=True, grams=estimate.grams, confidence=estimate.confidence)
+
+
+# ---------------------------------------------------------------------------
+# Browse recipes by category
+# ---------------------------------------------------------------------------
+
+_CATEGORY_LABELS = {
+    "all":          "All Recipes",
+    "vegan":        "Vegan",
+    "vegetarian":   "Vegetarian",
+    "quick":        "Quick (≤30 min)",
+    "needs_oven":   "Needs Oven",
+    "with_chicken": "With Chicken",
+    "with_tofu":    "With Tofu",
+    "with_beans":   "With Beans",
+    "with_fish":    "With Fish",
+}
+
+
+@router.get(
+    "/browse/categories",
+    response_model=list[BrowseCategoryCount],
+    summary="List browse categories with recipe counts",
+)
+def browse_categories(conn: DbConn, _: Auth):
+    counts = db.browse_recipes_counts(conn)
+    return [
+        BrowseCategoryCount(category=cat, label=_CATEGORY_LABELS.get(cat, cat), count=cnt)
+        for cat, cnt in counts.items()
+    ]
+
+
+@router.get(
+    "/browse",
+    response_model=list[RecipeBrowseItem],
+    summary="Browse recipes by category",
+)
+def browse_recipes_endpoint(
+    conn:     DbConn,
+    _:        Auth,
+    category: str = Query("all", description="Browse category"),
+):
+    rows = db.browse_recipes(conn, category)
+    return [
+        RecipeBrowseItem(
+            recipe_id       = r["recipe_id"],
+            recipe_name     = r["recipe_name"],
+            num_servings    = r["num_servings"],
+            vegan           = bool(r["vegan"]),
+            vegetarian      = bool(r["vegetarian"]),
+            need_oven       = bool(r["need_oven"]),
+            total_time_mins = r["total_time_mins"],
+            picture_path    = r["picture_path"],
+        )
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -881,8 +954,67 @@ async def upload_recipe_image(
     return MessageResponse(message=f"Image saved to {path}")
 
 
-def _ext(filename: str | None) -> str:
+def _ext(filename: Optional[str]) -> str:
     """Extract the file extension, defaulting to .jpg."""
     if filename and "." in filename:
         return "." + filename.rsplit(".", 1)[-1].lower()
     return ".jpg"
+
+
+# ---------------------------------------------------------------------------
+# Set recipe image from URL (called after import to grab og:image)
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{recipe_id}/image-from-url",
+    response_model=MessageResponse,
+    summary="Download and save a recipe photo from a URL",
+)
+def set_recipe_image_from_url(
+    recipe_id: int,
+    conn:      DbConn,
+    _:         Auth,
+    url:       str = Query(..., description="Public image URL to download"),
+):
+    try:
+        db.get_recipe(conn, recipe_id)
+    except db.NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
+
+    import re as _re
+    if not _re.match(r"^https?://", url.strip(), _re.IGNORECASE):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid image URL.")
+
+    try:
+        from curl_cffi import requests as _cr
+        resp = _cr.get(url, impersonate="chrome", timeout=15)
+        resp.raise_for_status()
+        data = resp.content
+    except Exception as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=f"Could not download image: {e}")
+
+    ct = resp.headers.get("content-type", "").lower()
+    ext = ".jpg"
+    if "png" in ct:
+        ext = ".png"
+    elif "webp" in ct:
+        ext = ".webp"
+    elif "gif" in ct:
+        ext = ".gif"
+    else:
+        # Guess from URL
+        m = _re.search(r"\.(jpg|jpeg|png|webp|gif)(\?|$)", url, _re.IGNORECASE)
+        if m:
+            ext = "." + m.group(1).lower()
+
+    filename = f"{recipe_id}{ext}"
+    try:
+        path = save_image(data, filename, "recipes")
+    except ValueError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+
+    db.update_recipe(conn, recipe_id, picture_path=path)
+    conn.commit()
+    return MessageResponse(message=f"Image saved to {path}")
+
+

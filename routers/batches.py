@@ -11,6 +11,7 @@ GET    /batches/{batch_id}              Get a batch with its current component l
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import app as App
 import db
@@ -64,7 +65,7 @@ def _build_batch_response(result: dict) -> BatchResponse:
     )
 
 
-def _ext(filename: str | None) -> str:
+def _ext(filename: Optional[str]) -> str:
     if filename and "." in filename:
         return "." + filename.rsplit(".", 1)[-1].lower()
     return ".jpg"
@@ -101,7 +102,7 @@ def create_batch(
     recipe_query: str,
     conn:         DbConn,
     _:            Auth,
-    batch_date:   str | None = None,
+    batch_date:   Optional[str] = None,
 ):
     """
     Searches for a recipe by name and creates a new batch.
@@ -129,8 +130,8 @@ def create_batch_from_recipe(
     recipe_id:       int,
     conn:            DbConn,
     _:               Auth,
-    batch_date:      str | None = None,
-    source_batch_id: int | None = Query(
+    batch_date:      Optional[str] = None,
+    source_batch_id: Optional[int] = Query(
         None, description="Mirror this batch's current ingredients and notes instead of the "
                            "recipe's (e.g. 'Cook This' from a past batch should reproduce what "
                            "was actually cooked, including substitutions)."),
@@ -403,7 +404,7 @@ def store_pending_batch_ingredient(
 
 def _get_pending_batch_ingredient(
     batch_id: int, ingredient_name: str
-) -> tuple | None:
+) -> Optional[tuple]:
     return _pending_batch.get(_pending_key(batch_id, ingredient_name))
 
 

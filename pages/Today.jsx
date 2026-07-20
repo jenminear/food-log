@@ -17,9 +17,16 @@ function fmt(n, digits = 1) {
   return n == null ? '—' : n.toFixed(digits)
 }
 
+function fmtBatchDate(dateStr) {
+  if (!dateStr) return 'batch'
+  const [y, m, d] = dateStr.split('-')
+  return `batch (${parseInt(m)}/${parseInt(d)}/${y.slice(2)})`
+}
+
 export default function Today() {
   const navigate = useNavigate()
-  const today = new Date().toISOString().slice(0, 10)
+  const now = new Date()
+  const today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`
   const [date, setDate]   = useState(today)
   const [data, setData]   = useState(null)
   const [error, setError] = useState(null)
@@ -96,6 +103,8 @@ export default function Today() {
                     <tr>
                       <th style={{textAlign:'left'}}>Meal</th>
                       <th style={{textAlign:'left'}}>Details</th>
+                      <th style={{textAlign:'left'}}>Portion</th>
+                      <th>Qty</th>
                       <th>kcal</th>
                       <th>Protein</th>
                       <th>Fat</th>
@@ -109,29 +118,33 @@ export default function Today() {
                       if (meal.source === 'batch') {
                         return (
                           <tr key={meal.meal_id}>
-                            <td style={{textAlign:'left', textTransform:'capitalize'}}>
+                            <td style={{textAlign:'left', textTransform:'capitalize', fontSize:'0.8rem'}}>
                               {meal.meal_type.replace('_', ' ')}
                             </td>
-                            <td style={{textAlign:'left'}}>
+                            <td style={{textAlign:'left', fontSize:'0.8rem'}}>
                               {meal.recipe_id != null ? (
                                 <button
                                   className="link-btn"
-                                  style={{background:'none', border:'none', padding:0, color:'var(--accent)', cursor:'pointer', textDecoration:'underline'}}
+                                  style={{background:'none', border:'none', padding:0, color:'var(--accent)', cursor:'pointer', textDecoration:'underline', fontSize:'0.8rem', textAlign:'left', display:'block', width:'100%'}}
                                   onClick={() => goToBatch(meal)}
                                 >
-                                  {meal.recipe_name} — {((meal.fraction_of_batch ?? 1) * 100).toFixed(0)}% of batch
+                                  {meal.recipe_name}
                                 </button>
                               ) : (
-                                <span>{meal.recipe_name} — {((meal.fraction_of_batch ?? 1) * 100).toFixed(0)}% of batch</span>
+                                <span style={{fontSize:'0.8rem'}}>{meal.recipe_name}</span>
                               )}
                             </td>
-                            <td className="mono">{fmt(meal.nutrition.calories, 0)}</td>
-                            <td className="mono">{fmt(meal.nutrition.protein_grams)}</td>
-                            <td className="mono">{fmt(meal.nutrition.fat_grams)}</td>
-                            <td className="mono">{fmt(meal.nutrition.carb_grams)}</td>
-                            <td className="mono">{fmt(meal.nutrition.fiber_grams)}</td>
+                            <td style={{textAlign:'left', color:'var(--text-faint)', fontSize:'0.8rem'}}>
+                              {fmtBatchDate(meal.batch_date)}
+                            </td>
+                            <td className="mono" style={{color:'var(--text-faint)', fontSize:'0.8rem'}}>{((meal.fraction_of_batch ?? 1) * 100).toFixed(0)}%</td>
+                            <td className="mono" style={{fontSize:'0.8rem'}}>{fmt(meal.nutrition.calories, 0)}</td>
+                            <td className="mono" style={{fontSize:'0.8rem'}}>{fmt(meal.nutrition.protein_grams)}</td>
+                            <td className="mono" style={{fontSize:'0.8rem'}}>{fmt(meal.nutrition.fat_grams)}</td>
+                            <td className="mono" style={{fontSize:'0.8rem'}}>{fmt(meal.nutrition.carb_grams)}</td>
+                            <td className="mono" style={{fontSize:'0.8rem'}}>{fmt(meal.nutrition.fiber_grams)}</td>
                             <td>
-                              <button className="btn btn-secondary" style={{padding:'0.25rem 0.5rem', fontSize:'0.875rem'}}
+                              <button className="btn btn-secondary" style={{padding:'0.25rem 0.5rem', fontSize:'0.8rem'}}
                                 onClick={() => handleDeleteMeal(meal.meal_id)}>
                                 Delete
                               </button>
@@ -149,19 +162,21 @@ export default function Today() {
                           {rows.map((c, j) => (
                             <tr key={j}>
                               {j === 0 && (
-                                <td rowSpan={rows.length} style={{textAlign:'left', textTransform:'capitalize'}}>
+                                <td rowSpan={rows.length} style={{textAlign:'left', textTransform:'capitalize', fontSize:'0.8rem'}}>
                                   {meal.meal_type.replace('_', ' ')}
                                 </td>
                               )}
-                              <td style={{textAlign:'left'}}>{c ? c.ingredient_name : <span className="text-faint">no ingredients</span>}</td>
-                              <td className="mono">{c ? fmt(c.calories, 0) : '—'}</td>
-                              <td className="mono">{c ? fmt(c.protein_grams) : '—'}</td>
-                              <td className="mono">{c ? fmt(c.fat_grams) : '—'}</td>
-                              <td className="mono">{c ? fmt(c.carb_grams) : '—'}</td>
-                              <td className="mono">{c ? fmt(c.fiber_grams) : '—'}</td>
+                              <td style={{textAlign:'left', fontSize:'0.8rem'}}>{c ? c.ingredient_name : <span className="text-faint">no ingredients</span>}</td>
+                              <td style={{textAlign:'left', color:'var(--text-faint)', fontSize:'0.8rem'}}>{c ? c.portion_unit : ''}</td>
+                              <td className="mono" style={{color:'var(--text-faint)', fontSize:'0.8rem'}}>{c ? fmt(c.quantity_multiple) : '—'}</td>
+                              <td className="mono" style={{fontSize:'0.8rem'}}>{c ? fmt(c.calories, 0) : '—'}</td>
+                              <td className="mono" style={{fontSize:'0.8rem'}}>{c ? fmt(c.protein_grams) : '—'}</td>
+                              <td className="mono" style={{fontSize:'0.8rem'}}>{c ? fmt(c.fat_grams) : '—'}</td>
+                              <td className="mono" style={{fontSize:'0.8rem'}}>{c ? fmt(c.carb_grams) : '—'}</td>
+                              <td className="mono" style={{fontSize:'0.8rem'}}>{c ? fmt(c.fiber_grams) : '—'}</td>
                               {j === 0 && (
                                 <td rowSpan={rows.length}>
-                                  <button className="btn btn-secondary" style={{padding:'0.25rem 0.5rem', fontSize:'0.875rem'}}
+                                  <button className="btn btn-secondary" style={{padding:'0.25rem 0.5rem', fontSize:'0.8rem'}}
                                     onClick={() => handleDeleteMeal(meal.meal_id)}>
                                     Delete
                                   </button>

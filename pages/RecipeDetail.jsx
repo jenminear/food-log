@@ -22,6 +22,7 @@ const NUTRITION_FIELDS = [
 const EMPTY_MANUAL = {
   ingredient_name: '',
   portion_unit: '',
+  portion_grams: '',
   calories: '',
   protein_grams: '',
   fat_grams: '',
@@ -609,16 +610,18 @@ export default function RecipeDetail() {
     setError(null)
     try {
       const unit = manualData.portion_unit.trim()
+      const portionG = isGramUnit(unit) ? 1 : parseFloat(manualData.portion_grams) || 100
+      const toP100 = v => v === '' ? null : (parseFloat(v) / portionG * 100)
       const resolved = await resolveIngredient({
         ingredient_name: manualData.ingredient_name.trim(),
         manual_data: {
           portion_unit: unit,
-          portion_grams: isGramUnit(unit) ? 1 : 100,
-          calories: manualData.calories === '' ? null : parseFloat(manualData.calories),
-          protein_grams: manualData.protein_grams === '' ? null : parseFloat(manualData.protein_grams),
-          fat_grams: manualData.fat_grams === '' ? null : parseFloat(manualData.fat_grams),
-          carb_grams: manualData.carb_grams === '' ? null : parseFloat(manualData.carb_grams),
-          fiber_grams: manualData.fiber_grams === '' ? null : parseFloat(manualData.fiber_grams),
+          portion_grams: portionG,
+          calories:      toP100(manualData.calories),
+          protein_grams: toP100(manualData.protein_grams),
+          fat_grams:     toP100(manualData.fat_grams),
+          carb_grams:    toP100(manualData.carb_grams),
+          fiber_grams:   toP100(manualData.fiber_grams),
         },
       })
       setResolvedIngredient(resolved)
@@ -793,23 +796,66 @@ export default function RecipeDetail() {
       {error && <div className="alert alert-error">{error}</div>}
 
       <div className="card">
-        <div className="btn-group mb-1">
-          {recipe.vegan      && <span className="badge badge-green">vegan</span>}
-          {recipe.vegetarian && <span className="badge badge-green">vegetarian</span>}
-          {recipe.need_oven  && <span className="badge badge-yellow">oven</span>}
-          {!recipe.is_locked && <span className="badge">draft — not yet cooked</span>}
+        <div style={{display:'flex', gap:'1.25rem', alignItems:'flex-start'}}>
+          {recipe.picture_path && (
+            <img
+              src={`/${recipe.picture_path}`}
+              alt={recipe.recipe_name}
+              style={{width:'140px', height:'140px', objectFit:'cover', borderRadius:'6px', flexShrink:0}}
+            />
+          )}
+          <div style={{flex:1}}>
+            <div className="btn-group mb-1">
+              {recipe.vegan      && <span className="badge badge-green">vegan</span>}
+              {recipe.vegetarian && <span className="badge badge-green">vegetarian</span>}
+              {recipe.need_oven  && <span className="badge badge-yellow">oven</span>}
+              {!recipe.is_locked && <span className="badge">draft — not yet cooked</span>}
+            </div>
+            <div className="form-row mt-1">
+              {recipe.num_servings     && <p>Servings: <strong>{recipe.num_servings}</strong></p>}
+              {recipe.active_time_mins && <p>Active: <strong>{recipe.active_time_mins} min</strong></p>}
+              {recipe.total_time_mins  && <p>Total: <strong>{recipe.total_time_mins} min</strong></p>}
+            </div>
+            {recipe.source && (
+              <p className="mt-1 text-sm">
+                Source: <a href={recipe.source} target="_blank" rel="noreferrer">{recipe.source}</a>
+              </p>
+            )}
+          </div>
         </div>
-        <div className="form-row mt-1">
-          {recipe.num_servings     && <p>Servings: <strong>{recipe.num_servings}</strong></p>}
-          {recipe.active_time_mins && <p>Active: <strong>{recipe.active_time_mins} min</strong></p>}
-          {recipe.total_time_mins  && <p>Total: <strong>{recipe.total_time_mins} min</strong></p>}
-        </div>
-        {recipe.source && (
-          <p className="mt-1 text-sm">
-            Source: <a href={recipe.source} target="_blank" rel="noreferrer">{recipe.source}</a>
-          </p>
-        )}
       </div>
+
+      {components.length > 0 && recipe.num_servings > 0 && (() => {
+        const nutKeys = ['calories', 'protein_grams', 'fat_grams', 'carb_grams', 'fiber_grams']
+        const totals = {}
+        for (const k of nutKeys) {
+          const vals = components.map(c => c[k] != null ? c[k] * (c.portion_grams / 100) * c.quantity_multiple : null)
+          totals[k] = vals.every(v => v == null) ? null : vals.reduce((a, v) => (a ?? 0) + (v ?? 0), null)
+        }
+        const perServing = k => totals[k] != null ? (totals[k] / recipe.num_servings).toFixed(k === 'calories' ? 0 : 1) : '—'
+        return (
+          <div className="card">
+            <h2 style={{marginBottom:'0.5rem'}}>Nutrition per Serving</h2>
+            <p className="text-sm text-faint" style={{marginBottom:'0.75rem'}}>
+              {recipe.num_servings} servings · totals from current ingredient list
+            </p>
+            <div style={{display:'grid', gridTemplateColumns:'repeat(5, 1fr)', gap:'0.5rem', textAlign:'center'}}>
+              {[
+                {k:'calories',label:'kcal'},
+                {k:'protein_grams',label:'Protein'},
+                {k:'fat_grams',label:'Fat'},
+                {k:'carb_grams',label:'Carbs'},
+                {k:'fiber_grams',label:'Fiber'},
+              ].map(({k,label}) => (
+                <div key={k}>
+                  <div className="mono" style={{fontSize:'1.1rem', fontWeight:600}}>{perServing(k)}</div>
+                  <div className="text-sm text-faint">{label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
 
       {batches.length > 0 && (
         <div className="card">
@@ -1111,13 +1157,21 @@ export default function RecipeDetail() {
                     onChange={e => setManualData({...manualData, ingredient_name: e.target.value})}
                   />
                 </div>
-                <div className="form-group">
-                  <label>Portion Unit <span style={{color:'red'}}>*</span></label>
-                  <input type="text" placeholder='e.g. "1 cup"' value={manualData.portion_unit}
-                    onChange={e => setManualData({...manualData, portion_unit: e.target.value})} />
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>Portion Unit <span style={{color:'red'}}>*</span></label>
+                    <input type="text" placeholder='e.g. "1 cup"' value={manualData.portion_unit}
+                      onChange={e => setManualData({...manualData, portion_unit: e.target.value})} />
+                  </div>
+                  <div className="form-group">
+                    <label>Portion Weight (g) <span style={{color:'red'}}>*</span></label>
+                    <input type="number" min="0.1" step="1" placeholder="e.g. 240"
+                      value={manualData.portion_grams}
+                      onChange={e => setManualData({...manualData, portion_grams: e.target.value})} />
+                  </div>
                 </div>
                 <p className="text-sm text-faint" style={{marginBottom:'0.5rem'}}>
-                  Nutrition values below are per 100g (optional):
+                  Nutrition values below are per 1 portion{manualData.portion_grams ? ` (${manualData.portion_grams}g)` : ''} (optional):
                 </p>
                 <div className="form-row-3">
                   {NUTRITION_FIELDS.map(f => (
@@ -1132,7 +1186,7 @@ export default function RecipeDetail() {
                   <button
                     className="btn btn-primary"
                     onClick={submitManualEntry}
-                    disabled={!manualData.ingredient_name || !manualData.portion_unit}
+                    disabled={!manualData.ingredient_name || !manualData.portion_unit || !manualData.portion_grams}
                   >
                     Continue
                   </button>

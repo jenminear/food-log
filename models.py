@@ -123,6 +123,24 @@ class ExtractedRecipeResponse(BaseModel):
     vegan:            bool = False
     ingredients:      list[ExtractedIngredient] = []
     steps:            list[str] = []
+    image_url:        Optional[str] = None
+
+
+class RecipeBrowseItem(BaseModel):
+    recipe_id:        int
+    recipe_name:      str
+    num_servings:     Optional[float]
+    vegan:            bool
+    vegetarian:       bool
+    need_oven:        bool
+    total_time_mins:  Optional[int]
+    picture_path:     Optional[str]
+
+
+class BrowseCategoryCount(BaseModel):
+    category: str
+    label:    str
+    count:    int
 
 
 class RecipeUrlRequest(BaseModel):
@@ -447,6 +465,7 @@ class MealNutritionDetail(BaseModel):
     recipe_id:         Optional[int] = None
     recipe_name:       Optional[str]
     batch_id:          Optional[int] = None
+    batch_date:        Optional[str] = None
     fraction_of_batch: Optional[float]
     components:        list[dict]
     nutrition:         NutritionDisplay

@@ -184,6 +184,60 @@ def search_recipes(conn: sqlite3.Connection, query: str) -> list[sqlite3.Row]:
     return conn.execute(sql, params).fetchall()
 
 
+_BROWSE_CATEGORIES = {
+    "vegan":        ("SELECT r.* FROM recipes r WHERE r.vegan = 1 ORDER BY r.recipe_name", []),
+    "vegetarian":   ("SELECT r.* FROM recipes r WHERE r.vegetarian = 1 ORDER BY r.recipe_name", []),
+    "quick":        ("SELECT r.* FROM recipes r WHERE r.total_time_mins IS NOT NULL AND r.total_time_mins <= 30 ORDER BY r.total_time_mins", []),
+    "needs_oven":   ("SELECT r.* FROM recipes r WHERE r.need_oven = 1 ORDER BY r.recipe_name", []),
+    "with_chicken": (
+        "SELECT DISTINCT r.* FROM recipes r "
+        "JOIN components c ON c.recipe_id = r.recipe_id AND c.batch_id IS NULL "
+        "JOIN ingredients i ON i.ingredient_id = c.ingredient_id "
+        "WHERE LOWER(i.ingredient_name) LIKE '%chicken%' ORDER BY r.recipe_name", [],
+    ),
+    "with_tofu": (
+        "SELECT DISTINCT r.* FROM recipes r "
+        "JOIN components c ON c.recipe_id = r.recipe_id AND c.batch_id IS NULL "
+        "JOIN ingredients i ON i.ingredient_id = c.ingredient_id "
+        "WHERE LOWER(i.ingredient_name) LIKE '%tofu%' ORDER BY r.recipe_name", [],
+    ),
+    "with_beans": (
+        "SELECT DISTINCT r.* FROM recipes r "
+        "JOIN components c ON c.recipe_id = r.recipe_id AND c.batch_id IS NULL "
+        "JOIN ingredients i ON i.ingredient_id = c.ingredient_id "
+        "WHERE LOWER(i.ingredient_name) LIKE '%bean%' OR LOWER(i.ingredient_name) LIKE '%chickpea%' "
+        "OR LOWER(i.ingredient_name) LIKE '%lentil%' ORDER BY r.recipe_name", [],
+    ),
+    "with_fish": (
+        "SELECT DISTINCT r.* FROM recipes r "
+        "JOIN components c ON c.recipe_id = r.recipe_id AND c.batch_id IS NULL "
+        "JOIN ingredients i ON i.ingredient_id = c.ingredient_id "
+        "WHERE LOWER(i.ingredient_name) LIKE '%salmon%' OR LOWER(i.ingredient_name) LIKE '%tuna%' "
+        "OR LOWER(i.ingredient_name) LIKE '%shrimp%' OR LOWER(i.ingredient_name) LIKE '%tilapia%' "
+        "OR LOWER(i.ingredient_name) LIKE '%cod%' ORDER BY r.recipe_name", [],
+    ),
+    "all":          ("SELECT * FROM recipes ORDER BY recipe_name", []),
+}
+
+
+def browse_recipes(conn: sqlite3.Connection, category: str = "all") -> list:
+    """Return recipes matching a predefined browse category."""
+    entry = _BROWSE_CATEGORIES.get(category)
+    if entry is None:
+        return []
+    sql, params = entry
+    return conn.execute(sql, params).fetchall()
+
+
+def browse_recipes_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Return {category: count} for all browse categories."""
+    result = {}
+    for cat, (sql, params) in _BROWSE_CATEGORIES.items():
+        count_sql = f"SELECT COUNT(*) as c FROM ({sql})"
+        result[cat] = conn.execute(count_sql, params).fetchone()["c"]
+    return result
+
+
 def update_recipe(
     conn: sqlite3.Connection,
     recipe_id: int,
@@ -1150,7 +1204,7 @@ def get_daily_nutrition(
 
     meals = conn.execute(
         """
-        SELECT m.*, b.recipe_id, r.recipe_name
+        SELECT m.*, b.recipe_id, b.date as batch_date, r.recipe_name
         FROM   meals m
         LEFT   JOIN batches b ON b.batch_id = m.batch_id
         LEFT   JOIN recipes r ON r.recipe_id = b.recipe_id
@@ -1206,6 +1260,7 @@ def get_daily_nutrition(
             "recipe_id":        meal["recipe_id"],
             "recipe_name":      meal["recipe_name"],
             "batch_id":         meal["batch_id"],
+            "batch_date":       meal["batch_date"] if meal["batch_id"] is not None else None,
             "fraction_of_batch": meal["fraction_of_batch"],
             "components":       comp_list,
             "nutrition":        nutrition,

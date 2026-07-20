@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { searchRecipes, createRecipe, finishRecipe, updateRecipe, extractRecipeFromUrl, extractRecipeFromImage } from './api.js'
+import { searchRecipes, createRecipe, finishRecipe, updateRecipe, extractRecipeFromUrl, extractRecipeFromImage, setRecipeImageFromUrl, browseCategories, browseRecipes } from './api.js'
 
 export default function Recipes() {
   const navigate = useNavigate()
@@ -30,6 +30,13 @@ export default function Recipes() {
   // Ingredients/steps extracted via AI, applied after the recipe is created
   const [extractedIngredients, setExtractedIngredients] = useState([])
   const [extractedSteps, setExtractedSteps] = useState([])
+  const [extractedImageUrl, setExtractedImageUrl] = useState(null)
+
+  // Browse state
+  const [browseMode, setBrowseMode] = useState(false)
+  const [categories, setCategories] = useState([])
+  const [selectedCategory, setSelectedCategory] = useState('all')
+  const [browseResults, setBrowseResults] = useState([])
 
   const [saving, setSaving] = useState(false)
 
@@ -37,6 +44,16 @@ export default function Recipes() {
     if (q.trim().length < 2) { setResults([]); return }
     searchRecipes(q).then(setResults).catch(() => setResults([]))
   }, [q])
+
+  useEffect(() => {
+    if (!browseMode) return
+    if (categories.length === 0) browseCategories().then(setCategories).catch(() => {})
+  }, [browseMode])
+
+  useEffect(() => {
+    if (!browseMode) return
+    browseRecipes(selectedCategory).then(setBrowseResults).catch(() => setBrowseResults([]))
+  }, [browseMode, selectedCategory])
 
   // Validate URL
   function isValidUrl(string) {
@@ -65,6 +82,7 @@ export default function Recipes() {
     setVegan(!!extracted.vegan)
     setExtractedIngredients(extracted.ingredients || [])
     setExtractedSteps(extracted.steps || [])
+    setExtractedImageUrl(extracted.image_url || null)
     setShowForm(true)
   }
 
@@ -147,6 +165,9 @@ export default function Recipes() {
         })
       }
 
+      if (extractedImageUrl) {
+        setRecipeImageFromUrl(session.recipe_id, extractedImageUrl).catch(() => {})
+      }
       const pendingIngredients = extractedIngredients
       resetForm()
       navigate(`/recipes/${session.recipe_id}`, { state: { pendingIngredients } })
@@ -171,6 +192,7 @@ export default function Recipes() {
     setRecipeUrl('')
     setExtractedIngredients([])
     setExtractedSteps([])
+    setExtractedImageUrl(null)
   }
 
   return (
@@ -393,30 +415,92 @@ export default function Recipes() {
         </div>
       )}
 
-      {/* Search existing recipes */}
-      <div className="card">
-        <div className="form-group" style={{margin:0}}>
-          <input type="text" value={q} onChange={e => setQ(e.target.value)}
-                 placeholder="Search recipes…" />
+      {/* Search / Browse toggle */}
+      <div className="card" style={{marginBottom:'0.75rem'}}>
+        <div style={{display:'flex', gap:'0.5rem', marginBottom: browseMode ? 0 : '0'}}>
+          <button className={'btn ' + (!browseMode ? 'btn-primary' : 'btn-secondary')}
+            onClick={() => setBrowseMode(false)}>Search</button>
+          <button className={'btn ' + (browseMode ? 'btn-primary' : 'btn-secondary')}
+            onClick={() => setBrowseMode(true)}>Browse</button>
+          {!browseMode && (
+            <input type="text" value={q} onChange={e => setQ(e.target.value)}
+              placeholder="Search recipes…" style={{flex:1}} />
+          )}
         </div>
       </div>
 
-      {results.length === 0 && q.length >= 2 && (
-        <div className="empty">No recipes found.</div>
-      )}
-      {results.map(r => (
-        <div className="card" key={r.recipe_id} style={{cursor:'pointer'}}
-             onClick={() => navigate(`/recipes/${r.recipe_id}`)}>
-          <div className="card-header">
-            <strong>{r.recipe_name}</strong>
-            <div className="btn-group">
-              {r.vegan      && <span className="badge badge-green">vegan</span>}
-              {r.vegetarian && <span className="badge badge-green">veggie</span>}
+      {!browseMode && (
+        <>
+          {results.length === 0 && q.length >= 2 && (
+            <div className="empty">No recipes found.</div>
+          )}
+          {results.map(r => (
+            <div className="card" key={r.recipe_id} style={{cursor:'pointer'}}
+                 onClick={() => navigate(`/recipes/${r.recipe_id}`)}>
+              <div className="card-header">
+                <strong>{r.recipe_name}</strong>
+                <div className="btn-group">
+                  {r.vegan      && <span className="badge badge-green">vegan</span>}
+                  {r.vegetarian && <span className="badge badge-green">veggie</span>}
+                </div>
+              </div>
+              <span className="text-faint text-sm">{r.num_servings} servings</span>
             </div>
+          ))}
+        </>
+      )}
+
+      {browseMode && (
+        <div style={{display:'grid', gridTemplateColumns:'200px 1fr', gap:'1rem', alignItems:'start'}}>
+          {/* Category panel */}
+          <div className="card" style={{padding:'0.5rem'}}>
+            {categories.map(cat => (
+              <button
+                key={cat.category}
+                onClick={() => setSelectedCategory(cat.category)}
+                style={{
+                  display:'block', width:'100%', textAlign:'left',
+                  padding:'0.5rem 0.75rem', border:'none', borderRadius:'6px',
+                  background: selectedCategory === cat.category ? 'var(--accent)' : 'transparent',
+                  color: selectedCategory === cat.category ? '#fff' : 'var(--text)',
+                  cursor:'pointer', marginBottom:'2px', fontSize:'0.875rem',
+                }}
+              >
+                {cat.label} <span style={{opacity:0.6, fontSize:'0.8rem'}}>({cat.count})</span>
+              </button>
+            ))}
           </div>
-          <span className="text-faint text-sm">{r.num_servings} servings</span>
+
+          {/* Recipe cards */}
+          <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(180px, 1fr))', gap:'0.75rem'}}>
+            {browseResults.length === 0 && (
+              <div className="empty" style={{gridColumn:'1/-1'}}>No recipes in this category.</div>
+            )}
+            {browseResults.map(r => (
+              <div key={r.recipe_id} className="card" style={{cursor:'pointer', padding:'0'}}
+                   onClick={() => navigate(`/recipes/${r.recipe_id}`)}>
+                {r.picture_path ? (
+                  <img src={`/${r.picture_path}`}
+                    alt={r.recipe_name}
+                    style={{width:'100%', aspectRatio:'4/3', objectFit:'cover', borderRadius:'8px 8px 0 0'}} />
+                ) : (
+                  <div style={{width:'100%', aspectRatio:'4/3', background:'var(--card-alt, #f0f0f0)',
+                    borderRadius:'8px 8px 0 0', display:'flex', alignItems:'center', justifyContent:'center',
+                    color:'var(--text-faint)', fontSize:'2rem'}}>🍽</div>
+                )}
+                <div style={{padding:'0.5rem'}}>
+                  <div style={{fontWeight:600, fontSize:'0.875rem', lineHeight:1.3}}>{r.recipe_name}</div>
+                  <div style={{fontSize:'0.75rem', color:'var(--text-faint)', marginTop:'0.25rem'}}>
+                    {r.num_servings && `${r.num_servings} srv`}
+                    {r.total_time_mins && ` · ${r.total_time_mins}m`}
+                    {r.vegan && ' · V'}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
-      ))}
+      )}
     </>
   )
 }
