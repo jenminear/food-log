@@ -6,6 +6,11 @@
 
 const BASE = import.meta.env.VITE_API_BASE || '/api'
 
+// Resolves a picture_path (e.g. "images/foo.jpg") to a full URL.
+// In production the images are proxied under /recipes/images/; in dev under /images/.
+const IMAGES_PREFIX = import.meta.env.VITE_IMAGES_PREFIX || ''
+export const imageUrl = (picturePath) => picturePath ? `${IMAGES_PREFIX}/${picturePath}` : null
+
 // Read optional API key from localStorage (set via Settings page later)
 const apiKey = () => localStorage.getItem('food_log_api_key') || ''
 

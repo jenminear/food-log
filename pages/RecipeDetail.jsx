@@ -7,7 +7,7 @@ import {
   updateIngredient, addRecipeComponent, updateRecipeComponent, deleteRecipeComponent,
   addBatchComponent, updateBatchComponent, deleteBatchComponent,
   getNotes, addNote, updateNote, deleteNote,
-  estimateIngredientWeight,
+  estimateIngredientWeight, imageUrl,
 } from './api.js'
 import { convertToPortionUnits, isGramUnit, computeCalories, isHighCalorieOutlier } from './unitConversion.js'
 
@@ -799,7 +799,7 @@ export default function RecipeDetail() {
         <div style={{display:'flex', gap:'1.25rem', alignItems:'flex-start'}}>
           {recipe.picture_path && (
             <img
-              src={`/${recipe.picture_path}`}
+              src={imageUrl(recipe.picture_path)}
               alt={recipe.recipe_name}
               style={{width:'140px', height:'140px', objectFit:'cover', borderRadius:'6px', flexShrink:0}}
             />

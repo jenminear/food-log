@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { searchRecipes, createRecipe, finishRecipe, updateRecipe, extractRecipeFromUrl, extractRecipeFromImage, setRecipeImageFromUrl, browseCategories, browseRecipes } from './api.js'
+import { searchRecipes, createRecipe, finishRecipe, updateRecipe, extractRecipeFromUrl, extractRecipeFromImage, setRecipeImageFromUrl, browseCategories, browseRecipes, imageUrl } from './api.js'
 
 export default function Recipes() {
   const navigate = useNavigate()
@@ -480,7 +480,7 @@ export default function Recipes() {
               <div key={r.recipe_id} className="card" style={{cursor:'pointer', padding:'0'}}
                    onClick={() => navigate(`/recipes/${r.recipe_id}`)}>
                 {r.picture_path ? (
-                  <img src={`/${r.picture_path}`}
+                  <img src={imageUrl(r.picture_path)}
                     alt={r.recipe_name}
                     style={{width:'100%', aspectRatio:'4/3', objectFit:'cover', borderRadius:'8px 8px 0 0'}} />
                 ) : (
