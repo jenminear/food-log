@@ -101,6 +101,10 @@ p  { color: var(--text-mid); }
   max-width: 860px;
 }
 
+/* ── Today page desktop/mobile split ───────────────────────────────── */
+.today-mobile { display: none; }
+.today-desktop { display: block; }
+
 /* ── Mobile layout ──────────────────────────────────────────────────── */
 @media (max-width: 640px) {
   .shell {
@@ -160,6 +164,13 @@ p  { color: var(--text-mid); }
   .form-row, .form-row-3 {
     grid-template-columns: 1fr;
   }
+
+  /* Today page: swap table for carousel */
+  .today-desktop { display: none; }
+  .today-mobile  { display: block; }
+
+  /* Hide scrollbar on carousel track */
+  .today-mobile ::-webkit-scrollbar { display: none; }
 
   /* Modal full-screen on mobile */
   .modal-overlay { padding: 0; align-items: flex-end; }
