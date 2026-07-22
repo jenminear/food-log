@@ -1,5 +1,13 @@
 import { NavLink } from 'react-router-dom'
 
+const tabs = [
+  { to: '/',            icon: '📊', label: 'Today' },
+  { to: '/reports',     icon: '📈', label: 'Reports' },
+  { to: '/recipes',     icon: '📖', label: 'Recipes' },
+  { to: '/ingredients', icon: '🥕', label: 'Ingredients' },
+  { to: '/settings',    icon: '⚙️',  label: 'Settings' },
+]
+
 export function Layout({ children }) {
   return (
     <div className="shell">
@@ -24,6 +32,17 @@ export function Layout({ children }) {
           <span className="nav-icon">⚙️</span> Settings
         </NavLink>
       </nav>
+
+      {/* Mobile bottom tab bar */}
+      <nav className="nav-mobile" style={{display:'none'}}>
+        {tabs.map(t => (
+          <NavLink key={t.to} to={t.to} className={({isActive}) => isActive ? 'active' : ''}>
+            <span className="nav-tab-icon">{t.icon}</span>
+            {t.label}
+          </NavLink>
+        ))}
+      </nav>
+
       <main className="main">
         {children}
       </main>
